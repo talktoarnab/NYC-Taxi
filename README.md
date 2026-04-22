@@ -48,6 +48,8 @@ Options:
 
 - `--no-charts` — Write KPI **CSV** files only; skip PNG chart generation (faster).
 - `-q` / `--quiet` — Minimal console output.
+- `--ym YYYY-MM` — Use the standard TLC URL for that month (overrides `NYC_TAXI_PARQUET_URL`).
+- `--parquet-url` — Use a full Parquet URL (overrides `--ym` and env).
 
 On success you get row-count audits in the console, a Gold Parquet file, and KPI files under `output/`.
 
@@ -83,10 +85,10 @@ print(result.gold_path, result.gold_rows)
 
 ## Data sources (default)
 
-- **Trips** — e.g. `https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet` (configurable in `nyc_taxi.config.Config.parquet_url`).
+- **Trips** — e.g. `https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet` (default when `NYC_TAXI_PARQUET_URL` is unset). The download is saved under `data/raw/` using the filename from the URL.
 - **Zones** — `https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv`
 
-To use another month or year, point `parquet_url` and the `parquet_path` property pattern at the matching TLC filename (or download manually into `data/raw/` and adjust `Config`).
+**Another month, on a schedule:** set the environment variable `NYC_TAXI_PARQUET_URL` to the full URL for the month you want (cron, systemd timer, or **GitHub Actions** repository/coded secrets), or run `python -m nyc_taxi --ym 2025-10`. Programmatically, `Config()` reads `NYC_TAXI_PARQUET_URL`, or pass `parquet_url=...` to `Config`. The pipeline only downloads a file if it is missing—delete the old `data/raw/yellow_tripdata_*.parquet` (or use a new month so the path changes) when you need a fresh download.
 
 ## Deployment (Streamlit, GitHub Actions, OCI, AWS)
 

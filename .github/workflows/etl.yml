@@ -28,8 +28,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Optional: set repository variable NYC_TAXI_PARQUET_URL to a full Parquet URL
+      # (e.g. https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-10.parquet)
       - name: Run ETL
+        env:
+          NYC_TAXI_PARQUET_URL: ${{ vars.NYC_TAXI_PARQUET_URL }}
         run: |
+          export NYC_TAXI_PARQUET_URL="https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-10.parquet"
           python -m nyc_taxi -q
 
       - name: Upload output artifacts

@@ -9,9 +9,33 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 # Resolve project root from this file: …/NYC Taxi/nyc_taxi/config.py → …/NYC Taxi
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Default TLC object; use another month or set NYC_TAXI_PARQUET_URL for scheduled runs
+_DEFAULT_PARQUET_URL = (
+    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet"
+)
+# Same host pattern as trip Parquet, for CLI `--ym` / programmatic URL building
+TLC_TRIP_DATA_BASE = "https://d37ci6vzurychx.cloudfront.net/trip-data/"
+
+
+def _parquet_basename_from_url(url: str) -> str:
+    """Last path segment of the trip Parquet URL (local `data/raw/` filename)."""
+    name = Path(unquote(urlparse(url).path)).name
+    if not name or not name.endswith(".parquet"):
+        return "yellow_tripdata_2024-01.parquet"
+    return name
+
+
+def _parquet_url_from_environ() -> str:
+    """NYC_TAXI_PARQUET_URL if non-empty, else the built-in default."""
+    raw = os.environ.get("NYC_TAXI_PARQUET_URL")
+    if raw is not None and raw.strip():
+        return raw.strip()
+    return _DEFAULT_PARQUET_URL
 
 
 @dataclass(frozen=True)
@@ -36,9 +60,7 @@ class Config:
     rush_pm_end: int = 19
 
     # Official TLC data lake (Parquet) and static zone → borough table
-    parquet_url: str = (
-        "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet"
-    )
+    parquet_url: str = field(default_factory=_parquet_url_from_environ)
     zone_url: str = (
         "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv"
     )
@@ -70,7 +92,7 @@ class Config:
 
     @property
     def parquet_path(self) -> Path:
-        return self.raw_dir / "yellow_tripdata_2024-01.parquet"
+        return self.raw_dir / _parquet_basename_from_url(self.parquet_url)
 
     @property
     def zone_path(self) -> Path:
