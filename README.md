@@ -15,7 +15,8 @@ This project ingests **NYC TLC Yellow Taxi** trip data (Parquet), applies **phys
 | `nyc_taxi/config.py` | URLs, JFK/LGA zone IDs, distance/speed limits, rush-hour hours, and directory paths |
 | `nyc_taxi/pipeline.py` | Full ETL, KPI aggregations, matplotlib chart export (non-interactive `Agg` backend) |
 | `nyc_taxi/__main__.py` | `python -m nyc_taxi` CLI |
-| `app.py` | Streamlit dashboard over Gold + KPI files |
+| `app.py` | Streamlit dashboard (local `output/` or latest **GitHub Actions** artifact via API) |
+| `nyc_taxi/github_artifact.py` | Download & extract `etl-output` from the GitHub REST API |
 | `nyc_taxi_pipeline.ipynb` | Step-by-step walkthrough of the same pipeline in a notebook |
 | `data/raw/` | Downloaded Parquet (e.g. `yellow_tripdata_2024-01.parquet`) |
 | `data/lookup/` | `taxi_zone_lookup.csv` |
@@ -56,7 +57,10 @@ On success you get row-count audits in the console, a Gold Parquet file, and KPI
 streamlit run app.py
 ```
 
-The UI shows a sample of the Gold table, key metrics, and four KPI tabs. You can use **Run full ETL pipeline** in the app to build data from scratch, or run `python -m nyc_taxi` first and refresh.
+- **With GitHub Actions:** If you set `GITHUB_TOKEN` and `GITHUB_REPO` (or `NYC_TAXI_GH_*` env vars) in **Streamlit Cloud → Secrets** (or a local ``.streamlit/secrets.toml``), the app **downloads the latest `etl-output` artifact** (same layout as a local `output/` run) and caches it under `~/.cache/nyc_taxi_streamlit`. It does **not** read large Parquet from the git tree.
+- **Local only:** Unset those secrets; the app uses the project’s `output/` and offers an optional **Run ETL locally** button, or run `python -m nyc_taxi` first.
+
+Details: **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**, and the `app.py` module docstring.
 
 ## Run the notebook
 

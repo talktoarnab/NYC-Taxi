@@ -1,22 +1,23 @@
 """
-Streamlit web UI for NYC Yellow Taxi Gold data and KPI artifacts.
+Streamlit web UI: reads Gold + KPI data from a **GitHub Actions artifact** (recommended for
+Streamlit Community Cloud) or, if unset, from local ``output/`` in the project tree.
 
-**Usage**
+**GitHub artifact mode** (set one of: env vars or ``.streamlit/secrets.toml``)
 
-1. (Optional) Build data first: ``python -m nyc_taxi`` from the project root.
-2. Start the app: ``streamlit run app.py``
-3. Or use the in-app **Run full ETL pipeline** button (same pipeline as the CLI;
-   may download ~50MB on first run).
+- ``NYC_TAXI_GH_TOKEN`` / ``GITHUB_TOKEN`` — PAT with **Actions: Read** (and ``repo`` for private repos)
+- ``NYC_TAXI_GH_REPO`` / ``GITHUB_REPO`` — ``owner/repo`` (e.g. ``myuser/nyc-taxi``)
+- ``GHA_ARTIFACT_NAME`` (optional) — must match the workflow `upload-artifact` name (default ``etl-output``)
+- ``NYC_TAXI_ARTIFACT_CACHE`` (optional) — directory to cache downloaded zips (default ``~/.cache/nyc_taxi_streamlit``)
 
-The UI reads ``output/gold/nyc_taxi_gold.parquet`` and files under ``output/kpi/``.
-If Gold is missing, the app shows a warning until you run the pipeline.
+**Local mode** — omit the token/repo; the app uses ``Config.base_dir`` (project root) and
+expects ``output/gold/nyc_taxi_gold.parquet`` from a prior ``python -m nyc_taxi`` run.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-# Ensure `import nyc_taxi` works when Streamlit runs this file as a script
 _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -24,7 +25,8 @@ if str(_ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 
-from nyc_taxi.config import default_config
+from nyc_taxi.config import Config, default_config
+from nyc_taxi.github_artifact import download_and_extract_latest_artifact, parse_repo
 from nyc_taxi.pipeline import run_pipeline
 
 st.set_page_config(
@@ -32,46 +34,128 @@ st.set_page_config(
     layout="wide",
 )
 
-config = default_config
+
+def _streamlit_secrets() -> dict | None:
+    try:
+        return {k: st.secrets[k] for k in st.secrets}
+    except Exception:
+        return None
+
+
+def get_artifact_credentials() -> tuple[str, str, str] | None:
+    """
+    Return (token, owner/repo string, artifact_name) if GHA mode is enabled.
+
+    Precedence: environment variables, then Streamlit ``secrets.toml``.
+    """
+    n = os.environ.get("GHA_ARTIFACT_NAME", "etl-output")
+    t = os.environ.get("NYC_TAXI_GH_TOKEN")
+    r = os.environ.get("NYC_TAXI_GH_REPO")
+    if t and r:
+        return t, r, n
+    t = os.environ.get("GITHUB_TOKEN")
+    r = os.environ.get("GITHUB_REPO")
+    if t and r:
+        return t, r, n
+
+    sec = _streamlit_secrets()
+    if not sec:
+        return None
+    t = (sec.get("NYC_TAXI_GH_TOKEN") or sec.get("GITHUB_TOKEN") or sec.get("github_token", "")) or ""
+    r = (sec.get("NYC_TAXI_GH_REPO") or sec.get("GITHUB_REPO") or sec.get("github_repo", "")) or ""
+    n = (sec.get("GHA_ARTIFACT_NAME") or sec.get("gha_artifact_name") or n) or "etl-output"
+    if t and r:
+        return t, r, str(n)
+    return None
+
+
+@st.cache_data(
+    ttl=300,
+    show_spinner="Downloading latest ETL output from GitHub Actions artifact…",
+)
+def _load_base_dir_from_artifact(
+    token: str,
+    repo_full: str,
+    artifact_name: str,
+) -> tuple[str, int | str, str]:
+    """
+    Return ``(base_dir, artifact_id, created_at)``.
+
+    Caches 5 minutes; use **Refresh** to call ``.clear()`` and pull a new run.
+    """
+    owner, repo = parse_repo(repo_full)
+    base, meta = download_and_extract_latest_artifact(
+        token, owner, repo, artifact_name, cache_root=None
+    )
+    aid = meta.get("id", "—")
+    return str(base), aid, str(meta.get("created_at", ""))
+
+
+def get_app_config() -> Config:
+    """Config pointing at local ``output/`` or at extracted artifact layout."""
+    trio = get_artifact_credentials()
+    if trio is None:
+        return default_config
+    token, repo_full, aname = trio
+    try:
+        base_s, aid, created = _load_base_dir_from_artifact(token, repo_full, aname)
+        st.session_state["gha_artifact_id"] = aid
+        st.session_state["gha_artifact_created"] = created
+    except Exception as e:
+        st.error(
+            f"Failed to load data from GitHub artifact **{aname}**: {e!s}. "
+            "Check token permissions (Actions: Read), `GITHUB_REPO`, and that a run produced the artifact."
+        )
+        st.stop()
+    return Config(base_dir=Path(base_s))
+
+
+config = get_app_config()
 gold_path = config.gold_path
 kpi_dir = config.kpi_dir
+artifact_mode = get_artifact_credentials() is not None
 
 st.title("NYC Yellow Taxi — Analytics")
-st.caption("Gold dataset and KPIs from the TLC ETL pipeline (Jan 2024 sample).")
-
-# Primary action: full end-to-end run (downloads if needed, writes Gold + KPI CSV/PNG)
-col_a, col_b = st.columns(2)
-with col_a:
-    if st.button("Run full ETL pipeline", type="primary", use_container_width=True):
-        with st.spinner("Downloading, cleaning, and building KPIs…"):
-            res = run_pipeline(config, verbose=False, skip_charts=False)
-        st.success(
-            f"Complete: {res.gold_rows:,} gold rows. "
-            f"Flow: {res.raw_rows:,} → {res.after_physics:,} (physics) → "
-            f"{res.after_financial:,} (financial)."
-        )
-        st.rerun()
-
-with col_b:
-    st.info(
-        "CLI: `python -m nyc_taxi` from the project directory. "
-        "First run downloads ~50MB Parquet and the zone lookup CSV."
+if artifact_mode:
+    st.caption(
+        "Data from the latest **GitHub Actions** artifact (not the git repo). "
+        f"Artifact id: `{st.session_state.get('gha_artifact_id', '—')}` · "
+        f"created: `{st.session_state.get('gha_artifact_created', '—')}`"
     )
+else:
+    st.caption("Gold and KPIs from local `output/` (run `python -m nyc_taxi` or use GHA + secrets for artifact mode).")
+
+# Controls: artifact mode → refresh from GitHub; else optional local ETL (only if you want it)
+c1, c2 = st.columns(2)
+if artifact_mode:
+    with c1:
+        if st.button("Refresh from latest GitHub artifact", type="primary", use_container_width=True):
+            _load_base_dir_from_artifact.clear()
+            st.rerun()
+    with c2:
+        st.info("Configure `GITHUB_TOKEN` + `GITHUB_REPO` (+ optional `GHA_ARTIFACT_NAME`) in app secrets or env.")
+else:
+    with c1:
+        if st.button("Run ETL locally (writes project output/)", use_container_width=True):
+            with st.spinner("Running pipeline…"):
+                res = run_pipeline(default_config, verbose=False, skip_charts=False)
+            st.success(
+                f"Complete: {res.gold_rows:,} gold rows. Rerun the app to load the new data."
+            )
+            st.rerun()
+    with c2:
+        st.info("For **Streamlit Cloud** without local disk, set secrets for GHA artifacts (see `app.py` docstring).")
 
 
 def load_kpi(name: str) -> pd.DataFrame | None:
-    """Load a KPI table saved by the pipeline; first column is the index in the CSV file."""
     p = kpi_dir / f"{name}.csv"
     if p.exists() and p.stat().st_size > 0:
         return pd.read_csv(p, index_col=0)
     return None
 
 
-# Gold Parquet is required for the main view; pipeline must run at least once
 if not gold_path.exists():
-    st.warning(
-        "No Gold file yet. Click **Run full ETL pipeline** above, or run `python -m nyc_taxi`."
-    )
+    st.warning("No Gold Parquet at the active data path. Run the scheduled workflow or (local) `python -m nyc_taxi`.")
     st.stop()
 
 df = pd.read_parquet(gold_path, engine="pyarrow")
@@ -99,7 +183,6 @@ st.dataframe(
 )
 
 st.divider()
-# Each tab: interactive chart from CSV (Streamlit) plus static PNG from the pipeline
 tab1, tab2, tab3, tab4 = st.tabs(
     ["Busiest hour", "Revenue by borough", "Efficiency ($/mi)", "Payment mix"]
 )
@@ -109,7 +192,7 @@ with tab1:
     if d is not None and "trip_count" in d.columns:
         st.bar_chart(d["trip_count"])
     else:
-        st.caption("Run the pipeline to generate kpi_busiest_hour.csv")
+        st.caption("Missing kpi_busiest_hour.csv in artifact output.")
     img = kpi_dir / "kpi_busiest_hour.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
@@ -122,7 +205,7 @@ with tab2:
             use_container_width=True,
         )
     else:
-        st.caption("Run the pipeline to generate kpi_revenue_by_borough.csv")
+        st.caption("Missing kpi_revenue_by_borough.csv in artifact output.")
     img = kpi_dir / "kpi_revenue_by_borough.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
@@ -136,7 +219,7 @@ with tab3:
             d.set_index("hour_of_day")[["avg_rev_per_mile", "median_rev_per_mile"]]
         )
     else:
-        st.caption("Run the pipeline to generate kpi_efficiency_index.csv")
+        st.caption("Missing kpi_efficiency_index.csv in artifact output.")
     img = kpi_dir / "kpi_efficiency_index.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
@@ -149,10 +232,12 @@ with tab4:
         st.dataframe(d, use_container_width=True)
         st.bar_chart(d.set_index("payment_label" if "payment_label" in d.columns else d.columns[0])["share_pct"])
     else:
-        st.caption("Run the pipeline to generate kpi_payment_trends.csv")
+        st.caption("Missing kpi_payment_trends.csv in artifact output.")
     img = kpi_dir / "kpi_payment_trends.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
 
 st.divider()
-st.caption(f"Output paths: {config.gold_dir} · {config.kpi_dir} — project: `{_ROOT}`")
+st.caption(
+    f"Active data: `{config.gold_path}` (base_dir=`{config.base_dir}`) · app root=`{_ROOT}`"
+)

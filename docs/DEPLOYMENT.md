@@ -6,7 +6,7 @@ This document walks through three ways to run the **ETL** (`python -m nyc_taxi`)
 - [2. Linux VM (Oracle Cloud Infrastructure)](#2-linux-vm-oracle-cloud-infrastructure)
 - [3. Amazon Web Services (AWS)](#3-amazon-web-services-aws)
 
-**Important:** The app reads `output/gold/nyc_taxi_gold.parquet` and `output/kpi/*` on disk. **Streamlit Community Cloud** only gets what is in your **Git** repo (or what you build at runtime). A full month of Gold data is **large**; do not commit it without Git LFS and a clear data policy. The guides below call out the tradeoffs.
+**Important (Cloud):** The app can load the latest **`etl-output` GitHub Actions artifact** over the API (not from git) when you set **Secrets** (see [Step 4b](#step-4b--streamlit-secrets-for-github-artifacts) below). Otherwise it expects `output/gold/…` and `output/kpi/…` on the machine (local or VM). A full month of Gold data is **large**; do not commit it without Git LFS and a clear data policy.
 
 ---
 
@@ -14,17 +14,15 @@ This document walks through three ways to run the **ETL** (`python -m nyc_taxi`)
 
 ### What you are setting up
 
-1. **GitHub Actions** runs the ETL on a schedule (or on demand), validates the pipeline, and stores **build artifacts** (the `output/` folder) on GitHub.
-2. **Streamlit Community Cloud** hosts the Streamlit **UI** from the same repository.
-
-**Limitation:** Artifacts from Actions are **not** automatically available to Streamlit’s servers. You must choose one of the following for data on the app:
+1. **GitHub Actions** runs the ETL on a schedule (or on demand) and uploads the **`output/`** folder as a zip artifact (default name: **`etl-output`**; see [`.github/workflows/etl.yml`](../.github/workflows/etl.yml)).
+2. **Streamlit Community Cloud** runs **`app.py`**, which can **download the latest non-expired artifact** via the GitHub REST API when you add [Secrets](#step-4b--streamlit-secrets-for-github-artifacts) (PAT with Actions read on that repo). Data is **not** read from the git working tree in that mode.
 
 | Approach | When to use |
 |--------|-------------|
-| **In-app “Run full ETL pipeline”** | Acceptable for demos; first run is slow and may hit **memory/time limits** on the free Streamlit Cloud tier. |
-| **Pre-generated small sample** in repo | Commit only small KPI CSVs (and optionally a **sample** Parquet) for read-only UI; not the full 3M-row file. |
-| **Self-host Streamlit** (sections 2–3) + cron ETL | Best for full production and full Gold data. |
-| **Object storage (S3) + app changes** | ETL in GHA uploads to S3; app reads from URL/secrets (requires code changes, not in the default `app.py`). |
+| **GitHub artifact + app secrets (built-in `app.py`)** | **Recommended** for Community Cloud: ETL in GHA; app pulls latest `etl-output` and caches on disk. |
+| **Local `output/`** | Run `app.py` on your laptop/VM; run `python -m nyc_taxi` (or GHA) to populate `output/`. |
+| **Self-host Streamlit** (sections 2–3) + cron ETL | Full control; use artifact mode or point `Config.base_dir` at shared storage. |
+| **S3 or other object storage** | Optional alternative if you do not want to use GitHub artifacts (requires custom loading code). |
 
 ### Step 1 — Push the project to GitHub
 
@@ -67,27 +65,37 @@ This document walks through three ways to run the **ETL** (`python -m nyc_taxi`)
 ### Step 4 — App settings (optional)
 
 - **Python version:** Set in Streamlit’s **Settings** to match the workflow (3.10+ if available).
-- **Secrets:** Not required for public TLC URLs. If you later add S3 or a database, use **Streamlit** → your app → **Settings** → **Secrets** with `toml` key/value pairs.
 
-### Step 5 — How the running app gets data
+### Step 4b — Streamlit secrets (GitHub artifacts)
 
-Pick one path that matches your tolerance for limits and maintenance:
+So `app.py` can download **ETL** output from your repo’s Actions:
 
-- **A. Rely on the in-app ETL button**  
-  A user (or you) opens the app and runs **Run full ETL pipeline**. Ensure the Streamlit app **machine type** has enough **RAM** (full pipeline can use several GB in-process).
+1. Create a [Personal Access Token (classic)](https://github.com/settings/tokens) or a **fine-grained** token:
+   - **Repository access:** the repo that runs the workflow.
+   - **Permissions:** at minimum **Actions: Read** (classic: include **`repo`** if the repository is private).
+2. In Streamlit: your app → **Settings** (gear) → **Secrets**, paste a TOML block (replace placeholders):
 
-- **B. Do not use full Gold on Cloud; ship KPI CSVs only**  
-  Add a small optional load path in your fork (e.g. read `output/kpi/*.csv` if present from `git`). The default `app.py` expects the full **Gold** Parquet for the main table; without it, the app **stops** with a warning. For production Cloud, you would either add a “demo mode” or use self-hosting (sections 2–3).
+   ```toml
+   GITHUB_TOKEN = "ghp_xxxxxxxxxxxx"
+   GITHUB_REPO = "your-username/nyc-taxi"
+   GHA_ARTIFACT_NAME = "etl-output"
+   ```
 
-- **C. Use a **fork** that reads Gold from S3** (advanced)  
-  After GHA runs ETL, add a job step: `aws s3 sync output/ s3://your-bucket/nyc-taxi/`. Then change `app.py` to load from `st.secrets["GOLD_S3_URI"]` or similar. This is the scalable pattern for Cloud + GHA ETL.
+   Aliases that `app.py` also accepts: `NYC_TAXI_GH_TOKEN`, `NYC_TAXI_GH_REPO`. For a local `streamlit run`, you can set the same keys in **`.streamlit/secrets.toml`** (do **not** commit the real token; use [`.streamlit/secrets.toml.example`](../.streamlit/secrets.toml.example) as a template).
+
+3. The app lists artifacts for `GITHUB_REPO`, picks the **newest** non-expired zip named `GHA_ARTIFACT_NAME`, downloads it, and extracts so `Config.base_dir/output/gold/…` exists. Use **Refresh from latest GitHub artifact** in the UI after a new workflow run. Cached downloads are kept under `~/.cache/nyc_taxi_streamlit/artifact_<id>` (or `NYC_TAXI_ARTIFACT_CACHE`).
+
+### Step 5 — If you are not using artifact secrets (local or VM)
+
+- Run **`python -m nyc_taxi`** in the same environment, or keep using **GHA** and copy `output/` to the host. The unauthenticated `app.py` path shows **Run ETL locally** and reads project `output/`.
 
 ### Checklist (Streamlit + GHA ETL)
 
 - [ ] Workflow runs green on `workflow_dispatch` or `schedule`
-- [ ] Artifacts contain expected `output/` layout
-- [ ] Streamlit app URL loads
-- [ ] You have a documented plan for **where Gold lives** relative to the Cloud app (A, B, or C above)
+- [ ] Artifact `etl-output` contains `output/gold/nyc_taxi_gold.parquet` and `output/kpi/`
+- [ ] `GITHUB_TOKEN` and `GITHUB_REPO` are set in Streamlit Secrets (for Cloud)
+- [ ] App URL loads; caption shows artifact id when in artifact mode
+- [ ] **Refresh** is used after a new run if the 5-minute cache is still serving old data
 
 ---
 

@@ -1,0 +1,24 @@
+# Local secrets (copy from .streamlit/secrets.toml.example)
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ETL I/O (large; from pipeline runs)
+data/raw/
+data/lookup/
+output/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# IDE
+.cursor/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
