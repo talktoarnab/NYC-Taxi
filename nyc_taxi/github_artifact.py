@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -99,22 +100,36 @@ def download_artifact_zip(
     return buf.getvalue()
 
 
-def find_project_base_dir(extract_root: Path) -> Path:
+def resolve_artifact_layout(extract_root: Path) -> tuple[Path, Path | None]:
     """
-    After unzipping a workflow artifact, locate the directory that should be
-    :attr:`Config.base_dir` (must contain ``output/gold/nyc_taxi_gold.parquet``).
-    """
-    direct = extract_root / "output" / "gold" / "nyc_taxi_gold.parquet"
-    if direct.is_file():
-        return extract_root
+    Return ``(config_base_dir, artifact_output_root | None)`` for :class:`nyc_taxi.config.Config`.
 
-    for p in extract_root.rglob("nyc_taxi_gold.parquet"):
-        # expect .../output/gold/nyc_taxi_gold.parquet
-        if p.parent.name == "gold" and p.parents[1].name == "output":
-            return p.parents[2]
-    raise FileNotFoundError(
-        f"Could not find nyc_taxi_gold.parquet under artifact extract path {extract_root!s}"
-    )
+    GitHub ``upload-artifact`` with ``path: output/`` often zips the **contents** of
+    ``output/`` at the zip root, so you get ``gold/`` and ``kpi/`` without an ``output/``
+    prefix. Local ``python -m nyc_taxi`` uses ``.../output/gold/`` — both are supported.
+    """
+    p_nested = extract_root / "output" / "gold" / "nyc_taxi_gold.parquet"
+    if p_nested.is_file():
+        return extract_root, None
+
+    p_flat = extract_root / "gold" / "nyc_taxi_gold.parquet"
+    if p_flat.is_file():
+        return extract_root, extract_root  # gold + kpi at zip root (common GHA layout)
+
+    found = [
+        p
+        for p in extract_root.rglob("nyc_taxi_gold.parquet")
+        if p.is_file() and p.parent.name == "gold"
+    ]
+    if not found:
+        raise FileNotFoundError(
+            f"Could not find nyc_taxi_gold.parquet under artifact path {extract_root!s}"
+        )
+    p = min(found, key=lambda x: len(x.parts))
+    if p.parents[1].name == "output":
+        return p.parents[2], None
+    data_root = p.parents[1]
+    return extract_root, data_root
 
 
 def download_and_extract_latest_artifact(
@@ -125,7 +140,11 @@ def download_and_extract_latest_artifact(
     cache_root: Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """
-    Download the latest named artifact, unzip, return ``(config_base_dir, artifact_meta)``.
+    Download the latest named artifact, unzip, return ``(config_base_dir, artifact_output_root, meta)``.
+
+    ``artifact_output_root`` is set when the zip uses a *flat* ``gold/``/``kpi/`` layout
+    (no ``output/`` directory); pass it to :class:`nyc_taxi.config.Config` as
+    ``artifact_output_root=``.
 
     Caches by artifact `id` under ``cache_root`` (default: ``~/.cache/nyc_taxi_streamlit``).
     Reuses cache if the directory already contains a valid layout for the same id.
@@ -142,17 +161,23 @@ def download_and_extract_latest_artifact(
     aid = int(meta["id"])
     target = cache_root / f"artifact_{aid}"
     try:
-        base_cached = find_project_base_dir(target)
-        gold = base_cached / "output" / "gold" / "nyc_taxi_gold.parquet"
-        if gold.is_file():
-            return base_cached, meta
+        base_cached, aor = resolve_artifact_layout(target)
+        g = (
+            (base_cached / "output" / "gold" / "nyc_taxi_gold.parquet")
+            if aor is None
+            else (aor / "gold" / "nyc_taxi_gold.parquet")
+        )
+        if g.is_file():
+            return base_cached, aor, meta
     except FileNotFoundError:
         pass
 
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
     target.mkdir(parents=True, exist_ok=True)
     data = download_artifact_zip(token, owner, repo, aid)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         zf.extractall(target)
 
-    base = find_project_base_dir(target)
-    return base, meta
+    base, aor = resolve_artifact_layout(target)
+    return base, aor, meta

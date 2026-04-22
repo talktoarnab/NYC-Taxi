@@ -44,6 +44,9 @@ class Config:
     )
 
     base_dir: Path = field(default_factory=lambda: PROJECT_ROOT)
+    # When set (e.g. flat GHA artifact: zip root has `gold/` + `kpi/`, not `output/gold/`), gold/kpi
+    # are read from here instead of base_dir / "output" / ...
+    artifact_output_root: Path | None = None
 
     @property
     def raw_dir(self) -> Path:
@@ -55,10 +58,14 @@ class Config:
 
     @property
     def gold_dir(self) -> Path:
+        if self.artifact_output_root is not None:
+            return self.artifact_output_root / "gold"
         return self.base_dir / "output" / "gold"
 
     @property
     def kpi_dir(self) -> Path:
+        if self.artifact_output_root is not None:
+            return self.artifact_output_root / "kpi"
         return self.base_dir / "output" / "kpi"
 
     @property

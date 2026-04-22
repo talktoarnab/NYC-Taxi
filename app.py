@@ -77,18 +77,19 @@ def _load_base_dir_from_artifact(
     token: str,
     repo_full: str,
     artifact_name: str,
-) -> tuple[str, int | str, str]:
+) -> tuple[str, str | None, int | str, str]:
     """
-    Return ``(base_dir, artifact_id, created_at)``.
+    Return ``(base_dir, artifact_output_root or None, artifact_id, created_at)``.
 
     Caches 5 minutes; use **Refresh** to call ``.clear()`` and pull a new run.
     """
     owner, repo = parse_repo(repo_full)
-    base, meta = download_and_extract_latest_artifact(
+    base, aor, meta = download_and_extract_latest_artifact(
         token, owner, repo, artifact_name, cache_root=None
     )
     aid = meta.get("id", "—")
-    return str(base), aid, str(meta.get("created_at", ""))
+    aor_s: str | None = str(aor) if aor is not None else None
+    return str(base), aor_s, aid, str(meta.get("created_at", ""))
 
 
 def get_app_config() -> Config:
@@ -98,7 +99,7 @@ def get_app_config() -> Config:
         return default_config
     token, repo_full, aname = trio
     try:
-        base_s, aid, created = _load_base_dir_from_artifact(token, repo_full, aname)
+        base_s, aor_s, aid, created = _load_base_dir_from_artifact(token, repo_full, aname)
         st.session_state["gha_artifact_id"] = aid
         st.session_state["gha_artifact_created"] = created
     except Exception as e:
@@ -107,7 +108,8 @@ def get_app_config() -> Config:
             "Check token permissions (Actions: Read), `GITHUB_REPO`, and that a run produced the artifact."
         )
         st.stop()
-    return Config(base_dir=Path(base_s))
+    aor_p = Path(aor_s) if aor_s else None
+    return Config(base_dir=Path(base_s), artifact_output_root=aor_p)
 
 
 config = get_app_config()
@@ -155,7 +157,20 @@ def load_kpi(name: str) -> pd.DataFrame | None:
 
 
 if not gold_path.exists():
-    st.warning("No Gold Parquet at the active data path. Run the scheduled workflow or (local) `python -m nyc_taxi`.")
+    if artifact_mode:
+        st.error(
+            f"No Gold Parquet at `{gold_path}`. The artifact may be empty, expired, or the zip layout changed. "
+            "Expect either `output/gold/nyc_taxi_gold.parquet` or a flat `gold/nyc_taxi_gold.parquet` (typical for `upload-artifact` of `output/`). "
+            "Confirm **ETL** succeeded and `GHA_ARTIFACT_NAME` matches the workflow (default `etl-output`)."
+        )
+    else:
+        st.warning(
+            "No Gold Parquet yet. **Pick one:**\n\n"
+            "1. **This machine** — in the project folder, run: `python -m nyc_taxi` (creates `output/gold/…`), then refresh this app.\n\n"
+            "2. **Streamlit Cloud / no local ETL** — in **App settings → Secrets**, add `GITHUB_TOKEN` and `GITHUB_REPO` "
+            "(and optional `GHA_ARTIFACT_NAME`) so the app pulls the latest workflow artifact instead of the repo. "
+            "See `docs/DEPLOYMENT.md` and `.streamlit/secrets.toml.example`."
+        )
     st.stop()
 
 df = pd.read_parquet(gold_path, engine="pyarrow")
