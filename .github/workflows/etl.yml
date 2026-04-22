@@ -28,13 +28,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Optional: set repository variable NYC_TAXI_PARQUET_URL to a full Parquet URL
-      # (e.g. https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-10.parquet)
+      # Set NYC_TAXI_PARQUET_URL under Settings → Actions → Variables, or the same
+      # name under Secrets (e.g. full URL: …/yellow_tripdata_2025-10.parquet).
+      # Do not override with a shell "export" here — that was ignoring Variables.
       - name: Run ETL
         env:
-          NYC_TAXI_PARQUET_URL: ${{ vars.NYC_TAXI_PARQUET_URL }}
+          # Secret, if set, wins; otherwise Repository / Environment variable
+          NYC_TAXI_PARQUET_URL: ${{ secrets.NYC_TAXI_PARQUET_URL || vars.NYC_TAXI_PARQUET_URL }}
         run: |
-          export NYC_TAXI_PARQUET_URL="https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-10.parquet"
+          if [ -z "$NYC_TAXI_PARQUET_URL" ]; then
+            echo '::warning::NYC_TAXI_PARQUET_URL is not set. Add it under GitHub → Settings → Actions → Variables or Repository secrets, or the ETL uses the 2024-01 default from config.py.'
+          fi
           python -m nyc_taxi -q
 
       - name: Upload output artifacts
