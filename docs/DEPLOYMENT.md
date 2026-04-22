@@ -55,7 +55,7 @@ This document walks through three ways to run the **ETL** (`python -m nyc_taxi`)
 3. On GitHub: **Actions** → select **ETL — NYC Taxi** → **Run workflow** (if `workflow_dispatch` is enabled) to test.
 4. After a successful run, open the workflow run → **Artifacts** → download `etl-output` to confirm `output/gold/` and `output/kpi/` were produced.
 
-**Cron:** The example workflow can run on a `schedule` (e.g. weekly). Adjust the cron in `etl.yml` to your needs.
+**Cron:** The example workflow runs **daily at 06:00 UTC** (`0 6 * * *`). Adjust the cron in `etl.yml` to your needs.
 
 ### Step 3 — Connect Streamlit Community Cloud
 

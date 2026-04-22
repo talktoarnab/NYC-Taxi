@@ -6,8 +6,8 @@ name: ETL — NYC Taxi
 on:
   workflow_dispatch:
   schedule:
-    # Weekly: Sunday 06:00 UTC (adjust or disable if not needed)
-    - cron: "0 6 * * 0"
+    # Daily at 06:00 UTC
+    - cron: "0 6 * * *"
 
 jobs:
   run-etl:
