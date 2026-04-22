@@ -71,7 +71,7 @@ def get_artifact_credentials() -> tuple[str, str, str] | None:
 
 @st.cache_data(
     ttl=300,
-    show_spinner="Downloading latest ETL output from GitHub Actions artifact…",
+    show_spinner="Getting Latest Updates…",
 )
 def _load_base_dir_from_artifact(
     token: str,
@@ -120,33 +120,12 @@ artifact_mode = get_artifact_credentials() is not None
 st.title("NYC Yellow Taxi — Analytics")
 if artifact_mode:
     st.caption(
-        "Data from the latest **GitHub Actions** artifact (not the git repo). "
-        f"Artifact id: `{st.session_state.get('gha_artifact_id', '—')}` · "
-        f"created: `{st.session_state.get('gha_artifact_created', '—')}`"
+        "Latest Data "
+        f"Updated: `{st.session_state.get('gha_artifact_created', '—')}`"
     )
 else:
     st.caption("Gold and KPIs from local `output/` (run `python -m nyc_taxi` or use GHA + secrets for artifact mode).")
 
-# Controls: artifact mode → refresh from GitHub; else optional local ETL (only if you want it)
-c1, c2 = st.columns(2)
-if artifact_mode:
-    with c1:
-        if st.button("Refresh from latest GitHub artifact", type="primary", use_container_width=True):
-            _load_base_dir_from_artifact.clear()
-            st.rerun()
-    with c2:
-        st.info("Configure `GITHUB_TOKEN` + `GITHUB_REPO` (+ optional `GHA_ARTIFACT_NAME`) in app secrets or env.")
-else:
-    with c1:
-        if st.button("Run ETL locally (writes project output/)", use_container_width=True):
-            with st.spinner("Running pipeline…"):
-                res = run_pipeline(default_config, verbose=False, skip_charts=False)
-            st.success(
-                f"Complete: {res.gold_rows:,} gold rows. Rerun the app to load the new data."
-            )
-            st.rerun()
-    with c2:
-        st.info("For **Streamlit Cloud** without local disk, set secrets for GHA artifacts (see `app.py` docstring).")
 
 
 def load_kpi(name: str) -> pd.DataFrame | None:
