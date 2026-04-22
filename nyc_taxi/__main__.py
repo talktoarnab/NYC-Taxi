@@ -66,6 +66,7 @@ def main() -> int:
         cfg,
         verbose=not args.quiet,
         skip_charts=args.no_charts,
+        apply_env_parquet_url=not (bool(args.ym) or bool(args.parquet_url)),
     )
     if not args.quiet:
         print(

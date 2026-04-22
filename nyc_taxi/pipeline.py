@@ -7,7 +7,9 @@ CSVs and static chart images for reporting or the Streamlit app.
 """
 from __future__ import annotations
 
+import os
 import ssl
+import sys
 import urllib.request
 import warnings
 from dataclasses import dataclass
@@ -23,7 +25,12 @@ import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-from nyc_taxi.config import PAYMENT_MAP, Config, default_config
+from nyc_taxi.config import (
+    PAYMENT_MAP,
+    Config,
+    config_with_env_parquet_url,
+    default_config,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -95,6 +102,8 @@ def run_pipeline(
     config: Config = default_config,
     verbose: bool = True,
     skip_charts: bool = False,
+    *,
+    apply_env_parquet_url: bool = True,
 ) -> PipelineResult:
     """
     Run the full ETL: download → load → physics filter → financial audit →
@@ -104,7 +113,25 @@ def run_pipeline(
         config: URLs, paths, and thresholds; see `nyc_taxi.config.Config`.
         verbose: When True, print progress and per-stage row counts.
         skip_charts: When True, skip matplotlib PNGs (KPI CSVs are still written).
+        apply_env_parquet_url: When True (default), merge in ``NYC_TAXI_PARQUET_URL`` from
+            the current process environment. Set False when the caller already fixed the
+            month via ``--ym`` or ``--parquet-url``.
     """
+    config = config_with_env_parquet_url(
+        config, apply_nyc_taxi_parquet_env=apply_env_parquet_url
+    )
+    # Always one line: proves which file the run uses (including ``-q`` in GitHub Actions).
+    if os.environ.get("NYC_TAXI_PARQUET_URL", "").strip():
+        src = "NYC_TAXI_PARQUET_URL"
+    else:
+        src = "default in config (no NYC_TAXI_PARQUET_URL in environment)"
+    print(
+        f"ETL trip file: {config.parquet_path.name} ← {src}",
+        file=sys.stderr,
+    )
+    if verbose:
+        print(f"  Parquet URL: {config.parquet_url}")
+
     config.ensure_dirs()
     plt.rcParams.update({"figure.dpi": 130, "figure.figsize": (10, 5)})
     sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)
@@ -126,6 +153,15 @@ def run_pipeline(
             f"\nRaw trip records  : {df_raw.shape[0]:,} rows  ×  {df_raw.shape[1]} columns"
         )
         print(f"Zone lookup table : {zone_lookup.shape[0]} rows  ×  {zone_lookup.shape[1]} columns")
+    if (
+        verbose
+        and "tpep_pickup_datetime" in df_raw.columns
+        and not df_raw.empty
+    ):
+        ts = pd.to_datetime(df_raw["tpep_pickup_datetime"], utc=True, errors="coerce")
+        print(
+            f"  Pickup dates (min … max, UTC): {ts.min()} … {ts.max()}"
+        )
 
     df = df_raw.copy()
     raw_count = len(df)

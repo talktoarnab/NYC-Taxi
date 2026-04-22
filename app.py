@@ -120,8 +120,10 @@ artifact_mode = get_artifact_credentials() is not None
 st.title("NYC Yellow Taxi — Analytics")
 if artifact_mode:
     st.caption(
-        "Latest Data "
-        f"Updated: `{st.session_state.get('gha_artifact_created', '—')}`"
+        "Latest data from the most recently downloaded **GitHub Actions** artifact (not from "
+        "`NYC_TAXI_PARQUET_URL`). After changing that variable, re-run the ETL workflow and use "
+        "**Refresh** in the app so a new `etl-output` is pulled.  "
+        f"Artifact: `{st.session_state.get('gha_artifact_created', '—')}`"
     )
 else:
     st.caption("Gold and KPIs from local `output/` (run `python -m nyc_taxi` or use GHA + secrets for artifact mode).")

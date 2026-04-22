@@ -7,7 +7,7 @@ Configuration for the NYC Taxi ETL: data URLs, physical/financial thresholds, an
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -106,6 +106,24 @@ class Config:
         """Create `data/*` and `output/*` folders before download or write."""
         for p in (self.raw_dir, self.lookup_dir, self.gold_dir, self.kpi_dir):
             p.mkdir(parents=True, exist_ok=True)
+
+
+def config_with_env_parquet_url(
+    config: Config,
+    *,
+    apply_nyc_taxi_parquet_env: bool = True,
+) -> Config:
+    """
+    If ``apply_nyc_taxi_parquet_env`` and ``NYC_TAXI_PARQUET_URL`` is non-empty,
+    return a copy of ``config`` with that URL. Otherwise return ``config`` unchanged
+    (so ``--ym`` / ``--parquet-url`` are not overwritten by a stale env in the same shell).
+    """
+    if not apply_nyc_taxi_parquet_env:
+        return config
+    raw = os.environ.get("NYC_TAXI_PARQUET_URL", "").strip()
+    if not raw or raw == config.parquet_url:
+        return config
+    return replace(config, parquet_url=raw)
 
 
 # TLC `payment_type` integer codes (used for labels and payment-mix KPIs)

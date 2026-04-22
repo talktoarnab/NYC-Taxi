@@ -11,6 +11,8 @@ on:
 
 jobs:
   run-etl:
+    # If you store NYC_TAXI_PARQUET_URL in Settings → Environments → <name> (not
+    # plain repository Variables), add:  environment: <name>  to this job.
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
