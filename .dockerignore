@@ -1,0 +1,17 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.env
+data/raw/*.parquet
+data/lookup/*.csv
+output/gold
+output/kpi
+*.ipynb_checkpoints
+.cursor
+nyc_taxi_pipeline.ipynb
+README.md
+docs
+.gitignore
