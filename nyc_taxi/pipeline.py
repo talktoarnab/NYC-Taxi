@@ -23,7 +23,12 @@ import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-from nyc_taxi.config import PAYMENT_MAP, Config, default_config
+from nyc_taxi.config import (
+    PAYMENT_MAP,
+    Config,
+    data_period_label_from_gold_df,
+    default_config,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -338,6 +343,7 @@ def run_pipeline(
     if not skip_charts:
         _save_all_charts(
             config,
+            df_gold,
             kpi_busiest_hour,
             kpi_borough_revenue,
             kpi_efficiency,
@@ -356,6 +362,7 @@ def run_pipeline(
 
 def _save_all_charts(
     config: Config,
+    df_gold: pd.DataFrame,
     kpi_busiest_hour: pd.DataFrame,
     kpi_borough_revenue: pd.DataFrame,
     kpi_efficiency: pd.DataFrame,
@@ -369,6 +376,7 @@ def _save_all_charts(
     """
     kpi_dir = config.kpi_dir
     R = config
+    period = data_period_label_from_gold_df(df_gold)
 
     # KPI 1 — trip volume by hour (rush hours highlighted for readability)
     fig, ax = plt.subplots(figsize=(12, 5))
@@ -387,7 +395,11 @@ def _save_all_charts(
     )
     ax.set_xlabel("Hour of Day (24 h)", fontsize=12)
     ax.set_ylabel("Number of Trips", fontsize=12)
-    ax.set_title("NYC Yellow Taxi — Busiest Hours (Jan 2024)", fontsize=14, fontweight="bold")
+    ax.set_title(
+        f"NYC Yellow Taxi — Busiest Hours ({period})",
+        fontsize=14,
+        fontweight="bold",
+    )
     ax.set_xticks(range(0, 24))
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x/1000:.0f}k"))
     legend_elements = [
@@ -444,7 +456,7 @@ def _save_all_charts(
             fontsize=9,
         )
     plt.suptitle(
-        "NYC Taxi — Driver Profitability by Borough (Jan 2024)",
+        f"NYC Taxi — Driver Profitability by Borough ({period})",
         fontsize=14,
         fontweight="bold",
         y=1.01,
@@ -479,7 +491,7 @@ def _save_all_charts(
     ax.set_xlabel("Hour of Day (24 h)", fontsize=12)
     ax.set_ylabel("Revenue per Mile (USD)", fontsize=12)
     ax.set_title(
-        "NYC Taxi — Efficiency Index: Revenue per Mile by Hour (Jan 2024)",
+        f"NYC Taxi — Efficiency Index: Revenue per Mile by Hour ({period})",
         fontsize=13,
         fontweight="bold",
     )
@@ -521,7 +533,12 @@ def _save_all_charts(
             ha="center",
             fontsize=9,
         )
-    plt.suptitle("NYC Taxi — Payment Trends (Jan 2024)", fontsize=14, fontweight="bold", y=1.01)
+    plt.suptitle(
+        f"NYC Taxi — Payment Trends ({period})",
+        fontsize=14,
+        fontweight="bold",
+        y=1.01,
+    )
     plt.tight_layout()
     fig.savefig(kpi_dir / "kpi_payment_trends.png", bbox_inches="tight")
     plt.close(fig)

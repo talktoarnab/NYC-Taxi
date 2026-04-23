@@ -86,6 +86,27 @@ class Config:
             p.mkdir(parents=True, exist_ok=True)
 
 
+def data_period_label_from_gold_df(df) -> str:
+    """
+    Build a display label for chart / UI text from the Gold table's
+    ``tpep_pickup_datetime`` (e.g. ``Feb 2026`` for a single month).
+    """
+    import pandas as pd
+
+    col = "tpep_pickup_datetime"
+    if col not in df.columns or len(df) == 0:
+        return "—"
+    s = pd.to_datetime(df[col], utc=True, errors="coerce").dropna()
+    if s.empty:
+        return "—"
+    mn, mx = s.min(), s.max()
+    if mn.year == mx.year and mn.month == mx.month:
+        return mn.strftime("%b %Y")
+    if mn.year == mx.year:
+        return f"{mn.strftime('%b')}–{mx.strftime('%b %Y')}"
+    return f"{mn.strftime('%b %Y')}–{mx.strftime('%b %Y')}"
+
+
 # TLC `payment_type` integer codes (used for labels and payment-mix KPIs)
 PAYMENT_MAP: dict[int, str] = {
     1: "Credit Card",

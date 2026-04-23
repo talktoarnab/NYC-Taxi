@@ -25,7 +25,7 @@ if str(_ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 
-from nyc_taxi.config import Config, default_config
+from nyc_taxi.config import Config, data_period_label_from_gold_df, default_config
 from nyc_taxi.github_artifact import download_and_extract_latest_artifact, parse_repo
 from nyc_taxi.pipeline import run_pipeline
 
@@ -156,6 +156,10 @@ if not gold_path.exists():
     st.stop()
 
 df = pd.read_parquet(gold_path, engine="pyarrow")
+st.caption(
+    f"**Trips in this build:** {data_period_label_from_gold_df(df)}  "
+    "(from pickup time range in the Gold file; charts use the same data.)"
+)
 st.subheader("Dataset snapshot")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Rows", f"{len(df):,}")
