@@ -105,6 +105,31 @@ class Config:
             p.mkdir(parents=True, exist_ok=True)
 
 
+def plausible_pickup_bounds_utc():
+    """
+    Inclusive [min, max] for ``tpep_pickup_datetime`` in Gold.
+
+    TLC’s monthly Yellow Parquet is from ~2009; a handful of source rows can carry
+    garbage years (e.g. 2007) that would otherwise stretch chart/UI period labels.
+    The upper bound allows runs that ship next months’ files before wall-clock time.
+    """
+    import pandas as pd
+
+    t_min = pd.Timestamp(2009, 1, 1, tz="UTC")
+    t_max = pd.Timestamp.now(tz="UTC") + pd.Timedelta(days=400)
+    return t_min, t_max
+
+
+def plausible_pickup_time_mask(pickup):
+    """Boolean mask, aligned to *pickup*, for rows whose pickup time is plausible."""
+    import pandas as pd
+
+    pu = pd.to_datetime(pickup, utc=True, errors="coerce")
+    t_min, t_max = plausible_pickup_bounds_utc()
+    m = pu.notna() & (pu >= t_min) & (pu <= t_max)
+    return m.to_numpy(dtype=bool)
+
+
 def data_period_label_from_gold_df(df) -> str:
     """
     Build a display label for chart / UI text from the Gold table's
@@ -115,7 +140,9 @@ def data_period_label_from_gold_df(df) -> str:
     col = "tpep_pickup_datetime"
     if col not in df.columns or len(df) == 0:
         return "—"
+    t_min, t_max = plausible_pickup_bounds_utc()
     s = pd.to_datetime(df[col], utc=True, errors="coerce").dropna()
+    s = s[(s >= t_min) & (s <= t_max)]
     if s.empty:
         return "—"
     mn, mx = s.min(), s.max()

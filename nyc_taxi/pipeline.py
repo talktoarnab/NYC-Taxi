@@ -34,6 +34,7 @@ from nyc_taxi.config import (
     data_period_label_from_gold_df,
     default_config,
     parquet_urls_from_repository_template,
+    plausible_pickup_time_mask,
     read_parquet_history_months,
 )
 
@@ -230,11 +231,19 @@ def _etl_raw_to_gold(
     df = df_raw.copy()
     raw_count = len(df)
 
+    df["tpep_pickup_datetime"] = pd.to_datetime(
+        df["tpep_pickup_datetime"], utc=True, errors="coerce"
+    )
+    df["tpep_dropoff_datetime"] = pd.to_datetime(
+        df["tpep_dropoff_datetime"], utc=True, errors="coerce"
+    )
+
     df["duration_hrs"] = (
         df["tpep_dropoff_datetime"] - df["tpep_pickup_datetime"]
     ).dt.total_seconds() / 3600
 
     td = df["trip_distance"].to_numpy()
+    mask_pickup = plausible_pickup_time_mask(df["tpep_pickup_datetime"])
     mask_distance = np.logical_and(td > 0, td <= config.max_distance_mi)
     safe_duration = np.where(
         df["duration_hrs"].to_numpy() > 0, df["duration_hrs"].to_numpy(), np.nan
@@ -242,13 +251,19 @@ def _etl_raw_to_gold(
     avg_speed = td / safe_duration
     mask_speed = avg_speed <= config.max_speed_mph
     mask_time = df["duration_hrs"].to_numpy() > 0
-    combined_mask = np.logical_and.reduce([mask_distance, mask_speed, mask_time])
+    combined_mask = np.logical_and.reduce(
+        [mask_pickup, mask_distance, mask_speed, mask_time]
+    )
     df = df.loc[combined_mask].copy()
     after_physics = len(df)
 
     if verbose:
         print("\n── Physics Filter Audit ─────────────────────────────────────────────")
         print(f"  Raw rows             : {raw_count:>10,}")
+        print(
+            f"  Removed (pickup time): {(~mask_pickup).sum():>10,}  "
+            f"({(~mask_pickup).mean()*100:.2f}%)"
+        )
         print(f"  Removed (distance)   : {(~mask_distance).sum():>10,}  ({(~mask_distance).mean()*100:.2f}%)")
         print(f"  Removed (speed)      : {(~mask_speed).sum():>10,}  ({(~mask_speed).mean()*100:.2f}%)")
         print(f"  Removed (time logic) : {(~mask_time).sum():>10,}  ({(~mask_time).mean()*100:.2f}%)")
