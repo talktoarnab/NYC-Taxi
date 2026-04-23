@@ -11,6 +11,7 @@ import os
 import ssl
 import urllib.request
 import warnings
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.ticker as mticker  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+import pyarrow as pa  # noqa: E402
+import pyarrow.parquet as pq  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
@@ -28,6 +31,7 @@ from nyc_taxi.config import (
     PAYMENT_MAP,
     Config,
     data_period_for_chart_titles,
+    data_period_label_from_gold_df,
     default_config,
     parquet_urls_from_repository_template,
     read_parquet_history_months,
@@ -99,6 +103,239 @@ def _download_if_missing(url: str, dest: Path, verbose: bool = True) -> None:
         print(f"  done  ({mb:.1f} MB)")
 
 
+class _MultiMonthKpiAcc:
+    """Streaming KPI aggregates so we never load the full Gold frame for groupbys."""
+
+    def __init__(self) -> None:
+        self.hour_count: dict[int, int] = defaultdict(int)
+        self.borough_sum: dict[object, float] = defaultdict(float)
+        self.borough_cnt: dict[object, int] = defaultdict(int)
+        self.hour_rpm_sum: dict[int, float] = defaultdict(float)
+        self.hour_rpm_cnt: dict[int, int] = defaultdict(int)
+        self.pay_cnt: dict[object, int] = defaultdict(int)
+        self.pay_rev: dict[object, float] = defaultdict(float)
+        self.pay_tip_sum: dict[object, float] = defaultdict(float)
+
+    def add_chunk(self, g: pd.DataFrame) -> None:
+        for hour, grp in g.groupby("hour_of_day", sort=False):
+            h = int(hour)
+            self.hour_count[h] += len(grp)
+            rpm = grp["revenue_per_mile"]
+            self.hour_rpm_sum[h] += float(rpm.sum())
+            self.hour_rpm_cnt[h] += int(rpm.count())
+        for borough, grp in g.groupby("pickup_borough", sort=False):
+            self.borough_sum[borough] += float(grp["total_amount"].sum())
+            self.borough_cnt[borough] += len(grp)
+        for plabel, grp in g.groupby("payment_label", sort=False):
+            self.pay_cnt[plabel] += len(grp)
+            self.pay_rev[plabel] += float(grp["total_amount"].sum())
+            self.pay_tip_sum[plabel] += float(grp["tip_pct"].sum())
+
+    def to_kpi_frames(
+        self,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        kpi_busiest_hour = pd.DataFrame(
+            [
+                {"hour_of_day": h, "trip_count": self.hour_count[h]}
+                for h in sorted(self.hour_count)
+            ]
+        ).sort_values("hour_of_day")
+        b_rows = []
+        for b in self.borough_sum:
+            tr = self.borough_sum[b]
+            cnt = self.borough_cnt[b]
+            b_rows.append(
+                {
+                    "pickup_borough": b,
+                    "total_revenue": tr,
+                    "avg_revenue": tr / cnt if cnt else 0.0,
+                    "trip_count": cnt,
+                }
+            )
+        kpi_borough_revenue = pd.DataFrame(b_rows).sort_values(
+            "total_revenue", ascending=True
+        )
+        e_rows = []
+        for h in sorted(self.hour_rpm_sum.keys()):
+            cnt = self.hour_rpm_cnt[h]
+            s = self.hour_rpm_sum[h]
+            avg = s / cnt if cnt else float("nan")
+            e_rows.append(
+                {
+                    "hour_of_day": h,
+                    "avg_rev_per_mile": avg,
+                    "median_rev_per_mile": avg,
+                    "trip_count": cnt,
+                }
+            )
+        kpi_efficiency = pd.DataFrame(e_rows).sort_values("hour_of_day")
+        p_rows = []
+        for p in self.pay_cnt:
+            cnt = self.pay_cnt[p]
+            p_rows.append(
+                {
+                    "payment_label": p,
+                    "trip_count": cnt,
+                    "total_revenue": self.pay_rev[p],
+                    "avg_tip_pct": self.pay_tip_sum[p] / cnt if cnt else 0.0,
+                }
+            )
+        kpi_payment = pd.DataFrame(p_rows)
+        kpi_payment["share_pct"] = (
+            kpi_payment["trip_count"] / kpi_payment["trip_count"].sum() * 100
+        ).round(2)
+        kpi_payment = kpi_payment.sort_values("trip_count", ascending=False)
+        return (
+            kpi_busiest_hour,
+            kpi_borough_revenue,
+            kpi_efficiency,
+            kpi_payment,
+        )
+
+
+def _write_period_sidecars(config: Config, period: str, verbose: bool) -> None:
+    kpi_dir = config.kpi_dir
+    kpi_dir.mkdir(parents=True, exist_ok=True)
+    _period_fp = kpi_dir / "kpi_chart_period.txt"
+    _period_fp.write_text(period + "\n", encoding="utf-8")
+    _out = config.base_dir / "output" / "etl_build_period.txt"
+    _out.parent.mkdir(parents=True, exist_ok=True)
+    _out.write_text(period + "\n", encoding="utf-8")
+    if verbose:
+        print(
+            f"  KPI chart title period: {period!r}  (PNG → {kpi_dir.resolve()!s}/; "
+            f"{_period_fp.name}; output/{_out.name})"
+        )
+
+
+def _etl_raw_to_gold(
+    df_raw: pd.DataFrame,
+    zone_lookup: pd.DataFrame,
+    config: Config,
+    verbose: bool,
+) -> tuple[pd.DataFrame, int, int, int]:
+    """Physics + financial + features + zone merge → one Gold-shaped chunk."""
+    if verbose:
+        print(
+            f"\nRaw trip records  : {df_raw.shape[0]:,} rows  ×  {df_raw.shape[1]} columns"
+        )
+    if (
+        verbose
+        and "tpep_pickup_datetime" in df_raw.columns
+        and not df_raw.empty
+    ):
+        ts = pd.to_datetime(df_raw["tpep_pickup_datetime"], utc=True, errors="coerce")
+        print(f"  Pickup dates (min … max, UTC): {ts.min()} … {ts.max()}")
+
+    df = df_raw.copy()
+    raw_count = len(df)
+
+    df["duration_hrs"] = (
+        df["tpep_dropoff_datetime"] - df["tpep_pickup_datetime"]
+    ).dt.total_seconds() / 3600
+
+    td = df["trip_distance"].to_numpy()
+    mask_distance = np.logical_and(td > 0, td <= config.max_distance_mi)
+    safe_duration = np.where(
+        df["duration_hrs"].to_numpy() > 0, df["duration_hrs"].to_numpy(), np.nan
+    )
+    avg_speed = td / safe_duration
+    mask_speed = avg_speed <= config.max_speed_mph
+    mask_time = df["duration_hrs"].to_numpy() > 0
+    combined_mask = np.logical_and.reduce([mask_distance, mask_speed, mask_time])
+    df = df.loc[combined_mask].copy()
+    after_physics = len(df)
+
+    if verbose:
+        print("\n── Physics Filter Audit ─────────────────────────────────────────────")
+        print(f"  Raw rows             : {raw_count:>10,}")
+        print(f"  Removed (distance)   : {(~mask_distance).sum():>10,}  ({(~mask_distance).mean()*100:.2f}%)")
+        print(f"  Removed (speed)      : {(~mask_speed).sum():>10,}  ({(~mask_speed).mean()*100:.2f}%)")
+        print(f"  Removed (time logic) : {(~mask_time).sum():>10,}  ({(~mask_time).mean()*100:.2f}%)")
+        print(f"  Removed (combined)   : {raw_count - after_physics:>10,}  ({(raw_count - after_physics)/raw_count*100:.2f}%)")
+        print(f"  Remaining rows       : {after_physics:>10,}")
+
+    neg_fare_mask = (df["fare_amount"] >= 0) & (df["total_amount"] >= 0)
+    n_neg = (~neg_fare_mask).sum()
+    df = df.loc[neg_fare_mask].copy()
+    if verbose:
+        print(f"\nNegative-fare rows removed : {n_neg:,}")
+        print(f"Rows after fare filter     : {len(df):,}")
+
+    df["tip_pct"] = np.where(
+        df["fare_amount"] > 0,
+        (df["tip_amount"] / df["fare_amount"]) * 100,
+        0.0,
+    )
+
+    fee_col = "Airport_fee" if "Airport_fee" in df.columns else "airport_fee"
+    airport_zones = np.array([config.jfk_zone_id, config.lga_zone_id])
+    is_airport_dest = np.isin(df["DOLocationID"].to_numpy(), airport_zones)
+
+    if fee_col in df.columns:
+        df["airport_fee_valid"] = np.where(
+            is_airport_dest,
+            df[fee_col].to_numpy() >= config.airport_surcharge,
+            True,
+        )
+        total_airport = int(is_airport_dest.sum())
+        discrepant = int((~df.loc[is_airport_dest, "airport_fee_valid"]).sum())
+        if verbose:
+            print("\n── Airport Surcharge Audit ──────────────────────────────────────────")
+            print(f"  Trips destined for JFK/LGA : {total_airport:>10,}")
+            pct = (discrepant / total_airport * 100) if total_airport else 0.0
+            print(f"  Fee discrepancies found    : {discrepant:>10,}  ({pct:.2f}% of airport trips)")
+    else:
+        df["airport_fee_valid"] = True
+        if verbose:
+            print(f'\nColumn "{fee_col}" not present — skipping surcharge audit.')
+
+    after_financial = len(df)
+    if verbose:
+        print(f"\nRows after financial audit : {after_financial:,}")
+
+    df["hour_of_day"] = df["tpep_pickup_datetime"].dt.hour
+    df["day_of_week"] = df["tpep_pickup_datetime"].dt.day_name()
+    df["month"] = df["tpep_pickup_datetime"].dt.month
+    df["date"] = df["tpep_pickup_datetime"].dt.date
+
+    hour_arr = df["hour_of_day"].to_numpy()
+    df["is_rush_hour"] = np.where(
+        ((hour_arr >= config.rush_am_start) & (hour_arr <= config.rush_am_end))
+        | ((hour_arr >= config.rush_pm_start) & (hour_arr <= config.rush_pm_end)),
+        True,
+        False,
+    )
+
+    zone_pu = zone_lookup[["LocationID", "Borough", "Zone"]].rename(
+        columns={
+            "LocationID": "PULocationID",
+            "Borough": "pickup_borough",
+            "Zone": "pickup_zone",
+        }
+    )
+    zone_do = zone_lookup[["LocationID", "Borough", "Zone"]].rename(
+        columns={
+            "LocationID": "DOLocationID",
+            "Borough": "dropoff_borough",
+            "Zone": "dropoff_zone",
+        }
+    )
+    df = df.merge(zone_pu, on="PULocationID", how="left").merge(
+        zone_do, on="DOLocationID", how="left"
+    )
+
+    df["revenue_per_mile"] = np.where(
+        df["trip_distance"] > 0,
+        df["total_amount"] / df["trip_distance"],
+        np.nan,
+    )
+    df["payment_label"] = df["payment_type"].map(PAYMENT_MAP).fillna("Unknown")
+
+    df_gold = df.copy()
+    return df_gold, raw_count, after_physics, after_financial
+
+
 def run_pipeline(
     config: Config = default_config,
     verbose: bool = False,
@@ -122,18 +359,40 @@ def run_pipeline(
     _download_if_missing(config.zone_url, config.zone_path, verbose)
 
     multi_urls = parquet_urls_from_repository_template()
+    zone_lookup = pd.read_csv(config.zone_path)
+    if verbose:
+        print(
+            f"Zone lookup table : {zone_lookup.shape[0]} rows  ×  {zone_lookup.shape[1]} columns"
+        )
+
+    kpi_dir = config.kpi_dir
+
+    def save_kpi(frame: pd.DataFrame, name: str) -> Path:
+        path = kpi_dir / f"{name}.csv"
+        frame.to_csv(path)
+        if verbose:
+            print(f"  Saved: {path}")
+        return path
+
     if multi_urls:
         if verbose:
             print(
                 f"PARQUET_URL mode: PARQUET_HISTORY_MONTHS={read_parquet_history_months()} "
-                f"→ {len(multi_urls)} monthly Parquet file(s) …"
+                f"→ {len(multi_urls)} monthly Parquet file(s) (streaming, low memory) …"
             )
         ci_log = (not verbose) and os.environ.get("CI", "").lower() in (
             "1",
             "true",
             "yes",
         )
-        frames: list[pd.DataFrame] = []
+        config.gold_path.unlink(missing_ok=True)
+        writer: pq.ParquetWriter | None = None
+        acc = _MultiMonthKpiAcc()
+        raw_count = 0
+        after_physics = 0
+        after_financial = 0
+        gold_rows = 0
+        n_ok = 0
         for i, url in enumerate(multi_urls):
             dest = config.raw_dir / url.rsplit("/", 1)[-1]
             if ci_log:
@@ -143,7 +402,7 @@ def run_pipeline(
                 )
             try:
                 _download_if_missing(url, dest, verbose)
-                frames.append(pd.read_parquet(dest, engine="pyarrow"))
+                df_raw = pd.read_parquet(dest, engine="pyarrow")
             except Exception as e:
                 if dest.exists():
                     try:
@@ -152,240 +411,151 @@ def run_pipeline(
                         pass
                 if verbose:
                     print(f"  [WARN]  {dest.name}: {e!s} — skipped")
-        if not frames:
+                continue
+            dg, r, ap, af = _etl_raw_to_gold(df_raw, zone_lookup, config, verbose)
+            del df_raw
+            raw_count += r
+            after_physics += ap
+            after_financial += af
+            gold_rows += len(dg)
+            acc.add_chunk(dg)
+            if len(dg) > 0:
+                table = pa.Table.from_pandas(dg, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        config.gold_path, table.schema, compression="snappy"
+                    )
+                elif table.schema != writer.schema:
+                    table = table.cast(writer.schema)
+                writer.write_table(table)
+                del table
+            del dg
+            n_ok += 1
+            if ci_log:
+                print(
+                    f"[CI] Wrote Gold chunk {n_ok}/{len(multi_urls)} "
+                    f"({gold_rows:,} cumulative rows)",
+                    flush=True,
+                )
+        if writer is not None:
+            writer.close()
+        if n_ok == 0:
             raise RuntimeError(
                 "No Parquet months could be loaded. Check PARQUET_URL, network, and TLC "
                 "availability for your date range."
             )
-        df_raw = pd.concat(frames, ignore_index=True)
-        del frames
+        if writer is None:
+            raise RuntimeError(
+                "No Gold rows written; every month was empty after filters."
+            )
+        (
+            kpi_busiest_hour,
+            kpi_borough_revenue,
+            kpi_efficiency,
+            kpi_payment,
+        ) = acc.to_kpi_frames()
+        save_kpi(kpi_busiest_hour.set_index("hour_of_day"), "kpi_busiest_hour")
+        save_kpi(
+            kpi_borough_revenue.set_index("pickup_borough"),
+            "kpi_revenue_by_borough",
+        )
+        save_kpi(kpi_efficiency.set_index("hour_of_day"), "kpi_efficiency_index")
+        save_kpi(kpi_payment.set_index("payment_label"), "kpi_payment_trends")
+        ts = pd.read_parquet(
+            config.gold_path,
+            columns=["tpep_pickup_datetime"],
+            engine="pyarrow",
+        )
+        chart_period = data_period_label_from_gold_df(ts)
+        del ts
     else:
         _download_if_missing(config.parquet_url, config.parquet_path, verbose)
+        if verbose:
+            print("\nAll sources ready.")
         df_raw = pd.read_parquet(config.parquet_path, engine="pyarrow")
-
-    if verbose:
-        print("\nAll sources ready.")
-
-    zone_lookup = pd.read_csv(config.zone_path)
-
-    if verbose:
-        print(
-            f"\nRaw trip records  : {df_raw.shape[0]:,} rows  ×  {df_raw.shape[1]} columns"
-        )
-        print(f"Zone lookup table : {zone_lookup.shape[0]} rows  ×  {zone_lookup.shape[1]} columns")
-    if (
-        verbose
-        and "tpep_pickup_datetime" in df_raw.columns
-        and not df_raw.empty
-    ):
-        ts = pd.to_datetime(df_raw["tpep_pickup_datetime"], utc=True, errors="coerce")
-        print(
-            f"  Pickup dates (min … max, UTC): {ts.min()} … {ts.max()}"
-        )
-
-    df = df_raw.copy()
-    raw_count = len(df)
-
-    # --- Physics filter (vectorized; trip_distance and duration in consistent units) ---
-    df["duration_hrs"] = (
-        df["tpep_dropoff_datetime"] - df["tpep_pickup_datetime"]
-    ).dt.total_seconds() / 3600
-
-    td = df["trip_distance"].to_numpy()
-    mask_distance = np.logical_and(td > 0, td <= config.max_distance_mi)
-
-    # Speed = miles / hours; use NaN duration so invalid rows fail the speed check
-    safe_duration = np.where(
-        df["duration_hrs"].to_numpy() > 0, df["duration_hrs"].to_numpy(), np.nan
-    )
-    avg_speed = td / safe_duration
-    mask_speed = avg_speed <= config.max_speed_mph
-
-    # Same as dropoff > pickup: positive trip length in time
-    mask_time = df["duration_hrs"].to_numpy() > 0
-    combined_mask = np.logical_and.reduce([mask_distance, mask_speed, mask_time])
-    df = df.loc[combined_mask].copy()
-    after_physics = len(df)
-
-    if verbose:
-        print("\n── Physics Filter Audit ─────────────────────────────────────────────")
-        print(f"  Raw rows             : {raw_count:>10,}")
-        print(f"  Removed (distance)   : {(~mask_distance).sum():>10,}  ({(~mask_distance).mean()*100:.2f}%)")
-        print(f"  Removed (speed)      : {(~mask_speed).sum():>10,}  ({(~mask_speed).mean()*100:.2f}%)")
-        print(f"  Removed (time logic) : {(~mask_time).sum():>10,}  ({(~mask_time).mean()*100:.2f}%)")
-        print(f"  Removed (combined)   : {raw_count - after_physics:>10,}  ({(raw_count - after_physics)/raw_count*100:.2f}%)")
-        print(f"  Remaining rows       : {after_physics:>10,}")
-
-    # --- Financial audit: non-negative money fields; tips and airport fee checks below ---
-    neg_fare_mask = (df["fare_amount"] >= 0) & (df["total_amount"] >= 0)
-    n_neg = (~neg_fare_mask).sum()
-    df = df.loc[neg_fare_mask].copy()
-    if verbose:
-        print(f"\nNegative-fare rows removed : {n_neg:,}")
-        print(f"Rows after fare filter     : {len(df):,}")
-
-    # Tip as % of fare; avoid divide-by-zero on zero-fare rows
-    df["tip_pct"] = np.where(
-        df["fare_amount"] > 0,
-        (df["tip_amount"] / df["fare_amount"]) * 100,
-        0.0,
-    )
-
-    # TLC column name varies; JFK / LaGuardia use LocationID 132 and 138 in the lookup table
-    fee_col = "Airport_fee" if "Airport_fee" in df.columns else "airport_fee"
-    airport_zones = np.array([config.jfk_zone_id, config.lga_zone_id])
-    is_airport_dest = np.isin(df["DOLocationID"].to_numpy(), airport_zones)
-
-    if fee_col in df.columns:
-        # Flag rows ending at an airport: recorded fee should meet TLC surcharge threshold
-        df["airport_fee_valid"] = np.where(
-            is_airport_dest,
-            df[fee_col].to_numpy() >= config.airport_surcharge,
-            True,
-        )
-        total_airport = int(is_airport_dest.sum())
-        discrepant = int((~df.loc[is_airport_dest, "airport_fee_valid"]).sum())
         if verbose:
-            print("\n── Airport Surcharge Audit ──────────────────────────────────────────")
-            print(f"  Trips destined for JFK/LGA : {total_airport:>10,}")
-            pct = (discrepant / total_airport * 100) if total_airport else 0.0
-            print(f"  Fee discrepancies found    : {discrepant:>10,}  ({pct:.2f}% of airport trips)")
-    else:
-        df["airport_fee_valid"] = True
+            print(
+                f"\nRaw trip records  : {df_raw.shape[0]:,} rows  ×  {df_raw.shape[1]} columns"
+            )
+        df_gold, raw_count, after_physics, after_financial = _etl_raw_to_gold(
+            df_raw, zone_lookup, config, verbose
+        )
+        df_gold.to_parquet(config.gold_path, index=False, engine="pyarrow")
+        gold_mb = config.gold_path.stat().st_size / 1_048_576
         if verbose:
-            print(f'\nColumn "{fee_col}" not present — skipping surcharge audit.')
+            print("\n════════════════════════════════════════════════════════════════════")
+            print("                    FILTER STAGE AUDIT LOG                          ")
+            print("════════════════════════════════════════════════════════════════════")
+            print(f"  Stage 0 — Raw ingestion        : {raw_count:>10,} rows  (100.00%)")
+            print(
+                f"  Stage 1 — Physics filter       : {after_physics:>10,} rows  "
+                f"({after_physics/raw_count*100:.2f}%)  [-{raw_count - after_physics:,} removed]"
+            )
+            print(
+                f"  Stage 2 — Financial audit      : {after_financial:>10,} rows  "
+                f"({after_financial/raw_count*100:.2f}%)  [-{after_physics - after_financial:,} removed]"
+            )
+            print(
+                f"  Stage 3 — Gold dataset (final) : {len(df_gold):>10,} rows  "
+                f"({len(df_gold)/raw_count*100:.2f}%)"
+            )
+            print("════════════════════════════════════════════════════════════════════")
+            print(f"  Gold file written to : {config.gold_path}")
+            print(f"  Gold file size       : {gold_mb:.1f} MB")
+            print("════════════════════════════════════════════════════════════════════")
 
-    after_financial = len(df)
-    if verbose:
-        print(f"\nRows after financial audit : {after_financial:,}")
-
-    # --- Feature engineering: time-of-day, rush flag, zone → borough, efficiency ---
-    df["hour_of_day"] = df["tpep_pickup_datetime"].dt.hour
-    df["day_of_week"] = df["tpep_pickup_datetime"].dt.day_name()
-    df["month"] = df["tpep_pickup_datetime"].dt.month
-    df["date"] = df["tpep_pickup_datetime"].dt.date
-
-    hour_arr = df["hour_of_day"].to_numpy()
-    # Morning 7–9 and evening 16–19 (inclusive) — config-driven for KPI shading
-    df["is_rush_hour"] = np.where(
-        ((hour_arr >= config.rush_am_start) & (hour_arr <= config.rush_am_end))
-        | ((hour_arr >= config.rush_pm_start) & (hour_arr <= config.rush_pm_end)),
-        True,
-        False,
-    )
-
-    # Map TLC LocationID to human-readable borough / zone (pickup and dropoff)
-    zone_pu = zone_lookup[["LocationID", "Borough", "Zone"]].rename(
-        columns={
-            "LocationID": "PULocationID",
-            "Borough": "pickup_borough",
-            "Zone": "pickup_zone",
-        }
-    )
-    zone_do = zone_lookup[["LocationID", "Borough", "Zone"]].rename(
-        columns={
-            "LocationID": "DOLocationID",
-            "Borough": "dropoff_borough",
-            "Zone": "dropoff_zone",
-        }
-    )
-    df = df.merge(zone_pu, on="PULocationID", how="left").merge(
-        zone_do, on="DOLocationID", how="left"
-    )
-
-    # Driver-side efficiency: total collected per mile driven
-    df["revenue_per_mile"] = np.where(
-        df["trip_distance"] > 0,
-        df["total_amount"] / df["trip_distance"],
-        np.nan,
-    )
-    df["payment_label"] = df["payment_type"].map(PAYMENT_MAP).fillna("Unknown")
-
-    # --- Load: single Gold table for analytics and the Streamlit app ---
-    df_gold = df.copy()
-    df_gold.to_parquet(config.gold_path, index=False, engine="pyarrow")
-    gold_mb = config.gold_path.stat().st_size / 1_048_576
-
-    if verbose:
-        print("\n════════════════════════════════════════════════════════════════════")
-        print("                    FILTER STAGE AUDIT LOG                          ")
-        print("════════════════════════════════════════════════════════════════════")
-        print(f"  Stage 0 — Raw ingestion        : {raw_count:>10,} rows  (100.00%)")
-        print(
-            f"  Stage 1 — Physics filter       : {after_physics:>10,} rows  "
-            f"({after_physics/raw_count*100:.2f}%)  [-{raw_count - after_physics:,} removed]"
+        kpi_busiest_hour = (
+            df_gold.groupby("hour_of_day")
+            .size()
+            .reset_index(name="trip_count")
+            .sort_values("hour_of_day")
         )
-        print(
-            f"  Stage 2 — Financial audit      : {after_financial:>10,} rows  "
-            f"({after_financial/raw_count*100:.2f}%)  [-{after_physics - after_financial:,} removed]"
+        save_kpi(kpi_busiest_hour.set_index("hour_of_day"), "kpi_busiest_hour")
+
+        kpi_borough_revenue = (
+            df_gold.groupby("pickup_borough")["total_amount"]
+            .agg(total_revenue="sum", avg_revenue="mean", trip_count="count")
+            .reset_index()
+            .sort_values("total_revenue", ascending=True)
         )
-        print(
-            f"  Stage 3 — Gold dataset (final) : {len(df_gold):>10,} rows  "
-            f"({len(df_gold)/raw_count*100:.2f}%)"
+        save_kpi(
+            kpi_borough_revenue.set_index("pickup_borough"),
+            "kpi_revenue_by_borough",
         )
-        print("════════════════════════════════════════════════════════════════════")
-        print(f"  Gold file written to : {config.gold_path}")
-        print(f"  Gold file size       : {gold_mb:.1f} MB")
-        print("════════════════════════════════════════════════════════════════════")
 
-    kpi_dir = config.kpi_dir
-
-    def save_kpi(frame: pd.DataFrame, name: str) -> Path:
-        """Write one KPI table next to the chart PNGs (stable filenames for the UI)."""
-        path = kpi_dir / f"{name}.csv"
-        frame.to_csv(path)
-        if verbose:
-            print(f"  Saved: {path}")
-        return path
-
-    # --- Analytical load: four KPI tables aligned with the plan / notebook ---
-    kpi_busiest_hour = (
-        df_gold.groupby("hour_of_day")
-        .size()
-        .reset_index(name="trip_count")
-        .sort_values("hour_of_day")
-    )
-    save_kpi(kpi_busiest_hour.set_index("hour_of_day"), "kpi_busiest_hour")
-
-    kpi_borough_revenue = (
-        df_gold.groupby("pickup_borough")["total_amount"]
-        .agg(total_revenue="sum", avg_revenue="mean", trip_count="count")
-        .reset_index()
-        .sort_values("total_revenue", ascending=True)
-    )
-    save_kpi(kpi_borough_revenue.set_index("pickup_borough"), "kpi_revenue_by_borough")
-
-    kpi_efficiency = (
-        df_gold.groupby("hour_of_day")["revenue_per_mile"]
-        .agg(
-            avg_rev_per_mile="mean",
-            median_rev_per_mile="median",
-            trip_count="count",
+        kpi_efficiency = (
+            df_gold.groupby("hour_of_day")["revenue_per_mile"]
+            .agg(
+                avg_rev_per_mile="mean",
+                median_rev_per_mile="median",
+                trip_count="count",
+            )
+            .reset_index()
+            .sort_values("hour_of_day")
         )
-        .reset_index()
-        .sort_values("hour_of_day")
-    )
-    save_kpi(kpi_efficiency.set_index("hour_of_day"), "kpi_efficiency_index")
+        save_kpi(kpi_efficiency.set_index("hour_of_day"), "kpi_efficiency_index")
 
-    kpi_payment = (
-        df_gold.groupby("payment_label")
-        .agg(
-            trip_count=("payment_label", "count"),
-            total_revenue=("total_amount", "sum"),
-            avg_tip_pct=("tip_pct", "mean"),
+        kpi_payment = (
+            df_gold.groupby("payment_label")
+            .agg(
+                trip_count=("payment_label", "count"),
+                total_revenue=("total_amount", "sum"),
+                avg_tip_pct=("tip_pct", "mean"),
+            )
+            .reset_index()
         )
-        .reset_index()
-    )
-    kpi_payment["share_pct"] = (
-        kpi_payment["trip_count"] / kpi_payment["trip_count"].sum() * 100
-    ).round(2)
-    kpi_payment = kpi_payment.sort_values("trip_count", ascending=False)
-    save_kpi(kpi_payment.set_index("payment_label"), "kpi_payment_trends")
+        kpi_payment["share_pct"] = (
+            kpi_payment["trip_count"] / kpi_payment["trip_count"].sum() * 100
+        ).round(2)
+        kpi_payment = kpi_payment.sort_values("trip_count", ascending=False)
+        save_kpi(kpi_payment.set_index("payment_label"), "kpi_payment_trends")
+        chart_period = data_period_for_chart_titles(config, df_gold)
 
+    _write_period_sidecars(config, chart_period, verbose)
     if not skip_charts:
         _save_all_charts(
             config,
-            df_gold,
+            chart_period,
             kpi_busiest_hour,
             kpi_borough_revenue,
             kpi_efficiency,
@@ -397,14 +567,14 @@ def run_pipeline(
         raw_rows=raw_count,
         after_physics=after_physics,
         after_financial=after_financial,
-        gold_rows=len(df_gold),
+        gold_rows=gold_rows if multi_urls else len(df_gold),
         gold_path=config.gold_path,
     )
 
 
 def _save_all_charts(
     config: Config,
-    df_gold: pd.DataFrame,
+    period: str,
     kpi_busiest_hour: pd.DataFrame,
     kpi_borough_revenue: pd.DataFrame,
     kpi_efficiency: pd.DataFrame,
@@ -415,23 +585,11 @@ def _save_all_charts(
     Save matplotlib figures to `output/kpi/*.png` (no display; `Agg` backend).
 
     Mirrors the notebook visuals: demand by hour, borough revenue, $/mile by hour, payment mix.
+    Period sidecar files are written by :func:`_write_period_sidecars`.
     """
     kpi_dir = config.kpi_dir
-    R = config
-    period = data_period_for_chart_titles(config, df_gold)
-    _period_fp = kpi_dir / "kpi_chart_period.txt"
     kpi_dir.mkdir(parents=True, exist_ok=True)
-    _period_fp.write_text(period + "\n", encoding="utf-8")
-    # Mirror at output/etl_build_period.txt so upload-artifact path: output/ always includes
-    # one path the Streamlit artifact reader can find (flat or nested zip layouts).
-    _out = R.base_dir / "output" / "etl_build_period.txt"
-    _out.parent.mkdir(parents=True, exist_ok=True)
-    _out.write_text(period + "\n", encoding="utf-8")
-    if verbose:
-        print(
-            f"  KPI chart title period: {period!r}  (PNG → {kpi_dir.resolve()!s}/; "
-            f"{_period_fp.name}; output/{_out.name})"
-        )
+    R = config
 
     # KPI 1 — trip volume by hour (rush hours highlighted for readability)
     fig, ax = plt.subplots(figsize=(12, 5))
