@@ -6,6 +6,8 @@
 #   PARQUET_URL — any TLC URL containing yellow_tripdata_YYYY-MM.parquet (month is rewritten
 #     at runtime for a rolling window). If unset, ETL uses the single default month in code.
 #   PARQUET_HISTORY_MONTHS — integer; rolling window length in months (default 60 if unset).
+#   PARQUET_WINDOW_END — optional: omit or 'template' = window ends at the month in PARQUET_URL;
+#     'today' = end at runner's current month (include months after the URL's Y-M).
 name: ETL — NYC Taxi
 
 on:

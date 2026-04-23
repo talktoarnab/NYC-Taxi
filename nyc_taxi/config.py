@@ -4,10 +4,12 @@ Configuration for the NYC Taxi ETL: data URLs, physical/financial thresholds, an
 `base_dir` defaults to the repository root (parent of the `nyc_taxi` package). Override
 `Config(base_dir=...)` if you need to run outputs elsewhere.
 
-Set env **PARQUET_URL** to any TLC ``yellow_tripdata_YYYY-MM.parquet`` URL; the ETL will
-rewrite the month segment and download **PARQUET_HISTORY_MONTHS** (env / repo variable; default **60**)
-of Yellow Taxi Parquet files, then consolidate into one Gold table. Unset **PARQUET_URL**
-to keep single-file mode using :attr:`Config.parquet_url`.
+Set env **PARQUET_URL** to any TLC ``yellow_tripdata_YYYY-MM.parquet`` URL. The **year-month
+in that filename** is the **end** of the rolling window (not the runner clock): the ETL
+rewrites the segment and downloads **PARQUET_HISTORY_MONTHS** months ending at that month,
+oldest first. Optional **PARQUET_WINDOW_END** = ``today`` uses ``date.today()`` instead (e.g.
+always include through the CI run month). Unset **PARQUET_URL** for single-file mode via
+:attr:`Config.parquet_url`.
 """
 from __future__ import annotations
 
@@ -23,6 +25,7 @@ _TRIP_PQ_FILENAME = re.compile(
 )
 PARQUET_URL_ENV = "PARQUET_URL"
 PARQUET_HISTORY_MONTHS_ENV = "PARQUET_HISTORY_MONTHS"
+PARQUET_WINDOW_END_ENV = "PARQUET_WINDOW_END"
 DEFAULT_PARQUET_HISTORY_MONTHS = 60
 MAX_PARQUET_HISTORY_MONTHS = 240
 
@@ -215,16 +218,41 @@ def read_parquet_history_months() -> int:
     return n
 
 
+def parquet_window_end_date(template_url: str) -> date:
+    """
+    Last calendar month included in the consolidated Parquet list.
+
+    * Default (unset **PARQUET_WINDOW_END** or ``template``): month from the
+      ``yellow_tripdata_YYYY-MM`` segment in **PARQUET_URL**.
+    * ``PARQUET_WINDOW_END=today``: use the runner's current date (previous behavior).
+    """
+    mode = (os.environ.get(PARQUET_WINDOW_END_ENV) or "template").strip().lower()
+    if mode in ("today", "now", "runner"):
+        return date.today()
+    if mode in ("template", "url", "parquet_url", ""):
+        m = _TRIP_PQ_FILENAME.search(template_url)
+        if m:
+            y, mo = int(m.group(2)), int(m.group(3))
+            if 1 <= mo <= 12:
+                return date(y, mo, 1)
+        return date.today()
+    raise ValueError(
+        f"{PARQUET_WINDOW_END_ENV} must be 'template' or 'today', got {mode!r}"
+    )
+
+
 def parquet_urls_from_repository_template() -> list[str] | None:
     """
     If ``PARQUET_URL`` is set, return TLC URLs for the rolling history window; else ``None``.
-    Window length comes from :func:`read_parquet_history_months`.
+    Window length from :func:`read_parquet_history_months`; end month from
+    :func:`parquet_window_end_date`.
     """
     raw = (os.environ.get(PARQUET_URL_ENV) or "").strip()
     if not raw:
         return None
     n = read_parquet_history_months()
-    pairs = rolling_month_pairs(date.today(), n)
+    end = parquet_window_end_date(raw)
+    pairs = rolling_month_pairs(end, n)
     return [build_yellow_trip_parquet_url(raw, y, mo) for y, mo in pairs]
 
 
