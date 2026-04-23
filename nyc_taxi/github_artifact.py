@@ -120,9 +120,10 @@ def resolve_artifact_layout(extract_root: Path) -> tuple[Path, Path | None]:
     """
     Return ``(config_base_dir, artifact_output_root | None)`` for :class:`nyc_taxi.config.Config`.
 
-    GitHub ``upload-artifact`` with ``path: output/`` often zips the **contents** of
-    ``output/`` at the zip root, so you get ``gold/`` and ``kpi/`` without an ``output/``
-    prefix. Local ``python -m nyc_taxi`` uses ``.../output/gold/`` — both are supported.
+    GitHub ``upload-artifact`` with ``path: output/`` zips paths **relative to** that
+    folder, so the zip root is often ``gold/`` + ``kpi/`` (no ``output/``). This repo’s
+    workflow stages ``output`` under ``_artifact_staging/`` so the artifact includes
+    ``output/gold/`` like a local run. Both flat and nested layouts are supported here.
     """
     p_nested = extract_root / "output" / "gold" / "nyc_taxi_gold.parquet"
     if p_nested.is_file():

@@ -32,10 +32,18 @@ jobs:
         run: |
           python -m nyc_taxi -q
 
+      # upload-artifact strips the uploaded directory's name from paths, so `path: output/`
+      # would yield a zip with `gold/` + `kpi/` at the root (no `output/`). Stage under a
+      # parent folder so the artifact matches local `output/` layout and docs.
+      - name: Stage artifact tree
+        run: |
+          mkdir -p _artifact_staging
+          cp -a output _artifact_staging/output
+
       - name: Upload output artifacts
         uses: actions/upload-artifact@v4
         with:
           name: etl-output
-          path: output/
+          path: _artifact_staging
           retention-days: 30
           if-no-files-found: error
