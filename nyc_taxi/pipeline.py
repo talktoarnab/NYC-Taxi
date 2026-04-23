@@ -28,6 +28,8 @@ from nyc_taxi.config import (
     Config,
     data_period_for_chart_titles,
     default_config,
+    parquet_urls_from_repository_template,
+    read_parquet_history_months,
 )
 
 warnings.filterwarnings("ignore")
@@ -116,14 +118,43 @@ def run_pipeline(
 
     if verbose:
         print("Fetching data sources:")
-    _download_if_missing(config.parquet_url, config.parquet_path, verbose)
     _download_if_missing(config.zone_url, config.zone_path, verbose)
+
+    multi_urls = parquet_urls_from_repository_template()
+    if multi_urls:
+        if verbose:
+            print(
+                f"PARQUET_URL mode: PARQUET_HISTORY_MONTHS={read_parquet_history_months()} "
+                f"→ {len(multi_urls)} monthly Parquet file(s) …"
+            )
+        frames: list[pd.DataFrame] = []
+        for url in multi_urls:
+            dest = config.raw_dir / url.rsplit("/", 1)[-1]
+            try:
+                _download_if_missing(url, dest, verbose)
+                frames.append(pd.read_parquet(dest, engine="pyarrow"))
+            except Exception as e:
+                if dest.exists():
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
+                if verbose:
+                    print(f"  [WARN]  {dest.name}: {e!s} — skipped")
+        if not frames:
+            raise RuntimeError(
+                "No Parquet months could be loaded. Check PARQUET_URL, network, and TLC "
+                "availability for your date range."
+            )
+        df_raw = pd.concat(frames, ignore_index=True)
+        del frames
+    else:
+        _download_if_missing(config.parquet_url, config.parquet_path, verbose)
+        df_raw = pd.read_parquet(config.parquet_path, engine="pyarrow")
+
     if verbose:
         print("\nAll sources ready.")
 
-    if verbose:
-        print("Loading Parquet …")
-    df_raw = pd.read_parquet(config.parquet_path, engine="pyarrow")
     zone_lookup = pd.read_csv(config.zone_path)
 
     if verbose:

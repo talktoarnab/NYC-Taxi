@@ -1,7 +1,11 @@
 # Run the NYC Taxi ETL on a schedule and on demand. Artifacts (output/) can be
 # downloaded from the workflow run to verify the pipeline, or you can extend this
 # with a step to sync to S3 for Streamlit to consume (requires app changes).
-#loutput: .github/workflows/etl.yml
+#
+# Repository variables (Settings → Secrets and variables → Actions → Variables):
+#   PARQUET_URL — any TLC URL containing yellow_tripdata_YYYY-MM.parquet (month is rewritten
+#     at runtime for a rolling window). If unset, ETL uses the single default month in code.
+#   PARQUET_HISTORY_MONTHS — integer; rolling window length in months (default 60 if unset).
 name: ETL — NYC Taxi
 
 on:
@@ -13,7 +17,7 @@ on:
 jobs:
   run-etl:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
@@ -30,6 +34,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run ETL
+        env:
+          PARQUET_URL: ${{ vars.PARQUET_URL }}
+          # Repo variable drives window size; when not defined, match Python default (60).
+          PARQUET_HISTORY_MONTHS: ${{ vars.PARQUET_HISTORY_MONTHS || '60' }}
         run: |
           python -m nyc_taxi -q
 

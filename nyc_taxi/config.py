@@ -3,6 +3,11 @@ Configuration for the NYC Taxi ETL: data URLs, physical/financial thresholds, an
 
 `base_dir` defaults to the repository root (parent of the `nyc_taxi` package). Override
 `Config(base_dir=...)` if you need to run outputs elsewhere.
+
+Set env **PARQUET_URL** to any TLC ``yellow_tripdata_YYYY-MM.parquet`` URL; the ETL will
+rewrite the month segment and download **PARQUET_HISTORY_MONTHS** (env / repo variable; default **60**)
+of Yellow Taxi Parquet files, then consolidate into one Gold table. Unset **PARQUET_URL**
+to keep single-file mode using :attr:`Config.parquet_url`.
 """
 from __future__ import annotations
 
@@ -11,6 +16,15 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+
+# TLC monthly Yellow trip files (used when expanding PARQUET_URL).
+_TRIP_PQ_FILENAME = re.compile(
+    r"(?i)(yellow_tripdata_)(\d{4})-(\d{2})(\.parquet)"
+)
+PARQUET_URL_ENV = "PARQUET_URL"
+PARQUET_HISTORY_MONTHS_ENV = "PARQUET_HISTORY_MONTHS"
+DEFAULT_PARQUET_HISTORY_MONTHS = 60
+MAX_PARQUET_HISTORY_MONTHS = 240
 
 # Resolve project root from this file: …/NYC Taxi/nyc_taxi/config.py → …/NYC Taxi
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -130,16 +144,88 @@ def data_period_from_parquet_url(url: str) -> str | None:
 
 def data_period_for_chart_titles(config: Config, df) -> str:
     """
-    Chart / UI label: for ETL, prefer the month in ``parquet_url`` (TLC filename);
-    for Streamlit with a GitHub artifact, ``parquet_url`` is not the build source—use
-    min/max ``tpep_pickup_datetime`` in Gold only.
+    Chart / UI label from Gold trip timestamps when available (single month or span);
+    otherwise fall back to ``parquet_url`` filename.
     """
+    label = data_period_label_from_gold_df(df)
+    if label != "—":
+        return label
     if config.artifact_output_root is not None:
-        return data_period_label_from_gold_df(df)
+        return "—"
     u = data_period_from_parquet_url(getattr(config, "parquet_url", "") or "")
-    if u:
-        return u
-    return data_period_label_from_gold_df(df)
+    return u if u else "—"
+
+
+def build_yellow_trip_parquet_url(template: str, year: int, month: int) -> str:
+    """Replace ``yellow_tripdata_YYYY-MM.parquet`` in *template* with the given month."""
+    if not _TRIP_PQ_FILENAME.search(template):
+        raise ValueError(
+            "PARQUET_URL must contain a TLC Yellow file segment like "
+            "'yellow_tripdata_2026-02.parquet'"
+        )
+    if not 1 <= month <= 12:
+        raise ValueError(f"month must be 1..12, got {month}")
+
+    def _sub(m: re.Match[str]) -> str:
+        return f"{m.group(1)}{year:04d}-{month:02d}{m.group(4)}"
+
+    return _TRIP_PQ_FILENAME.sub(_sub, template, count=1)
+
+
+def rolling_month_pairs(end: date | None, n_months: int) -> list[tuple[int, int]]:
+    """The *n_months* most recent calendar months ending at *end* (inclusive), oldest first."""
+    if n_months < 1:
+        raise ValueError("n_months must be >= 1")
+    if end is None:
+        end = date.today()
+    out: list[tuple[int, int]] = []
+    y, m = end.year, end.month
+    for _ in range(n_months):
+        out.append((y, m))
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    out.reverse()
+    return out
+
+
+def read_parquet_history_months() -> int:
+    """
+    Month count for consolidated ETL (``PARQUET_HISTORY_MONTHS`` env).
+
+    Set this in GitHub Actions from repository variable ``PARQUET_HISTORY_MONTHS``.
+    Empty / unset → :data:`DEFAULT_PARQUET_HISTORY_MONTHS`.
+    """
+    raw = (os.environ.get(PARQUET_HISTORY_MONTHS_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_PARQUET_HISTORY_MONTHS
+    try:
+        n = int(raw, 10)
+    except ValueError as e:
+        raise ValueError(
+            f"{PARQUET_HISTORY_MONTHS_ENV} must be an integer, got {raw!r}"
+        ) from e
+    if n < 1:
+        raise ValueError(f"{PARQUET_HISTORY_MONTHS_ENV} must be >= 1, got {n}")
+    if n > MAX_PARQUET_HISTORY_MONTHS:
+        raise ValueError(
+            f"{PARQUET_HISTORY_MONTHS_ENV} must be <= {MAX_PARQUET_HISTORY_MONTHS}, got {n}"
+        )
+    return n
+
+
+def parquet_urls_from_repository_template() -> list[str] | None:
+    """
+    If ``PARQUET_URL`` is set, return TLC URLs for the rolling history window; else ``None``.
+    Window length comes from :func:`read_parquet_history_months`.
+    """
+    raw = (os.environ.get(PARQUET_URL_ENV) or "").strip()
+    if not raw:
+        return None
+    n = read_parquet_history_months()
+    pairs = rolling_month_pairs(date.today(), n)
+    return [build_yellow_trip_parquet_url(raw, y, mo) for y, mo in pairs]
 
 
 # TLC `payment_type` integer codes (used for labels and payment-mix KPIs)
