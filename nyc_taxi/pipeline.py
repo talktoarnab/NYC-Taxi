@@ -26,7 +26,7 @@ from matplotlib.patches import Patch  # noqa: E402
 from nyc_taxi.config import (
     PAYMENT_MAP,
     Config,
-    data_period_label_from_gold_df,
+    data_period_for_chart_titles,
     default_config,
 )
 
@@ -376,7 +376,14 @@ def _save_all_charts(
     """
     kpi_dir = config.kpi_dir
     R = config
-    period = data_period_label_from_gold_df(df_gold)
+    period = data_period_for_chart_titles(config, df_gold)
+    _period_fp = kpi_dir / "kpi_chart_period.txt"
+    kpi_dir.mkdir(parents=True, exist_ok=True)
+    _period_fp.write_text(period + "\n", encoding="utf-8")
+    if verbose:
+        print(
+            f"  KPI chart title period: {period!r}  (PNG → {kpi_dir.resolve()!s}/; also {_period_fp.name})"
+        )
 
     # KPI 1 — trip volume by hour (rush hours highlighted for readability)
     fig, ax = plt.subplots(figsize=(12, 5))

@@ -7,7 +7,9 @@ Configuration for the NYC Taxi ETL: data URLs, physical/financial thresholds, an
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 # Resolve project root from this file: …/NYC Taxi/nyc_taxi/config.py → …/NYC Taxi
@@ -105,6 +107,39 @@ def data_period_label_from_gold_df(df) -> str:
     if mn.year == mx.year:
         return f"{mn.strftime('%b')}–{mx.strftime('%b %Y')}"
     return f"{mn.strftime('%b %Y')}–{mx.strftime('%b %Y')}"
+
+
+def data_period_from_parquet_url(url: str) -> str | None:
+    """
+    Parse ``.../yellow_tripdata_YYYY-MM.parquet`` from the TLC trip URL, if present.
+    Used so chart titles match the configured file month, not a stale or mis-parsed
+    timestamp column in Gold.
+    """
+    m = re.search(
+        r"yellow_tripdata_(\d{4})-(\d{2})\.parquet",
+        url,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    y, mo = int(m.group(1)), int(m.group(2))
+    if not 1 <= mo <= 12:
+        return None
+    return date(y, mo, 1).strftime("%b %Y")
+
+
+def data_period_for_chart_titles(config: Config, df) -> str:
+    """
+    Chart / UI label: for ETL, prefer the month in ``parquet_url`` (TLC filename);
+    for Streamlit with a GitHub artifact, ``parquet_url`` is not the build source—use
+    min/max ``tpep_pickup_datetime`` in Gold only.
+    """
+    if config.artifact_output_root is not None:
+        return data_period_label_from_gold_df(df)
+    u = data_period_from_parquet_url(getattr(config, "parquet_url", "") or "")
+    if u:
+        return u
+    return data_period_label_from_gold_df(df)
 
 
 # TLC `payment_type` integer codes (used for labels and payment-mix KPIs)
