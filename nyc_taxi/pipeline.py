@@ -380,9 +380,15 @@ def _save_all_charts(
     _period_fp = kpi_dir / "kpi_chart_period.txt"
     kpi_dir.mkdir(parents=True, exist_ok=True)
     _period_fp.write_text(period + "\n", encoding="utf-8")
+    # Mirror at output/etl_build_period.txt so upload-artifact path: output/ always includes
+    # one path the Streamlit artifact reader can find (flat or nested zip layouts).
+    _out = R.base_dir / "output" / "etl_build_period.txt"
+    _out.parent.mkdir(parents=True, exist_ok=True)
+    _out.write_text(period + "\n", encoding="utf-8")
     if verbose:
         print(
-            f"  KPI chart title period: {period!r}  (PNG → {kpi_dir.resolve()!s}/; also {_period_fp.name})"
+            f"  KPI chart title period: {period!r}  (PNG → {kpi_dir.resolve()!s}/; "
+            f"{_period_fp.name}; output/{_out.name})"
         )
 
     # KPI 1 — trip volume by hour (rush hours highlighted for readability)

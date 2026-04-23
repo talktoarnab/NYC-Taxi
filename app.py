@@ -142,6 +142,34 @@ def load_kpi(name: str) -> pd.DataFrame | None:
     return None
 
 
+def _read_artifact_build_period(config: Config, df: pd.DataFrame) -> tuple[str, str, bool]:
+    """
+    Return (one-line label, source note, is_fallback_to_gold).
+
+    Prefer ETL-written sidecars from the same run as the PNGs. Cloud often uses a
+    flat ``gold/``/``kpi/`` tree at the zip root; also check ``etl_build_period.txt``.
+    """
+    b = config.base_dir
+    candidates: list[tuple[Path, str]] = [
+        (config.kpi_dir / "kpi_chart_period.txt", "kpi/kpi_chart_period.txt"),
+        (b / "etl_build_period.txt", "etl_build_period.txt (next to gold/)"),
+        (b / "output" / "etl_build_period.txt", "output/etl_build_period.txt"),
+    ]
+    for path, source in candidates:
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                return (path.read_text(encoding="utf-8").strip(), source, False)
+        except OSError:
+            continue
+    for p in b.rglob("kpi_chart_period.txt"):
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                return (p.read_text(encoding="utf-8").strip(), f"rglob: {p.relative_to(b)}", False)
+        except (OSError, ValueError):
+            continue
+    return (data_period_for_chart_titles(config, df), "trip times in Gold (no sidecar in artifact)", True)
+
+
 if not gold_path.exists():
     if artifact_mode:
         st.error(
@@ -160,15 +188,19 @@ if not gold_path.exists():
     st.stop()
 
 df = pd.read_parquet(gold_path, engine="pyarrow")
-_period_p = kpi_dir / "kpi_chart_period.txt"
-if _period_p.is_file() and _period_p.stat().st_size:
-    _period_line = _period_p.read_text(encoding="utf-8").strip()
-else:
-    _period_line = data_period_for_chart_titles(config, df)
+_period_line, _period_src, _period_is_fallback = _read_artifact_build_period(config, df)
 st.caption(
-    f"**Build period (matches KPI chart PNGs when present):** {_period_line}  "
-    f"{'(from kpi_chart_period.txt)' if _period_p.is_file() else '(from Config / trip times)'}."
+    f"**Build period (matches KPI chart PNGs when ETL sidecars are in the zip):** {_period_line}  "
+    f"· _{_period_src}_"
 )
+if artifact_mode and _period_is_fallback:
+    st.info(
+        "No `kpi_chart_period.txt` / `etl_build_period.txt` in this artifact — label is from **Gold trip "
+        "dates** (e.g. Jan 2024). Re-run the **ETL** workflow on a commit that includes the current "
+        "`nyc_taxi/pipeline.py` (writes those files) and an updated `config.py` `parquet_url`, then use "
+        "**Reload from GitHub** in the sidebar. Redeploy the Streamlit app if it is on an old commit without "
+        "this reader."
+    )
 st.subheader("Dataset snapshot")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Rows", f"{len(df):,}")
