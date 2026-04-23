@@ -155,7 +155,7 @@ def download_and_extract_latest_artifact(
     repo: str,
     artifact_name: str,
     cache_root: Path | None = None,
-) -> tuple[Path, dict[str, Any]]:
+) -> tuple[Path, Path | None, dict[str, Any]]:
     """
     Download the latest named artifact, unzip, return ``(config_base_dir, artifact_output_root, meta)``.
 

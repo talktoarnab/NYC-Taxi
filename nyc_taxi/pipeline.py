@@ -98,7 +98,7 @@ def _download_if_missing(url: str, dest: Path, verbose: bool = True) -> None:
 
 def run_pipeline(
     config: Config = default_config,
-    verbose: bool = True,
+    verbose: bool = False,
     skip_charts: bool = False,
 ) -> PipelineResult:
     """
@@ -107,7 +107,7 @@ def run_pipeline(
 
     Args:
         config: URLs, paths, and thresholds; see `nyc_taxi.config.Config`.
-        verbose: When True, print progress and per-stage row counts.
+        verbose: When True, print download progress and filter audit details.
         skip_charts: When True, skip matplotlib PNGs (KPI CSVs are still written).
     """
     config.ensure_dirs()

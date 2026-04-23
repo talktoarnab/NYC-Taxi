@@ -1,16 +1,7 @@
 """
-Streamlit web UI: reads Gold + KPI data from a **GitHub Actions artifact** (recommended for
-Streamlit Community Cloud) or, if unset, from local ``output/`` in the project tree.
-
-**GitHub artifact mode** (set one of: env vars or ``.streamlit/secrets.toml``)
-
-- ``NYC_TAXI_GH_TOKEN`` / ``GITHUB_TOKEN`` — PAT with **Actions: Read** (and ``repo`` for private repos)
-- ``NYC_TAXI_GH_REPO`` / ``GITHUB_REPO`` — ``owner/repo`` (e.g. ``myuser/nyc-taxi``)
-- ``GHA_ARTIFACT_NAME`` (optional) — must match the workflow `upload-artifact` name (default ``etl-output``)
-- ``NYC_TAXI_ARTIFACT_CACHE`` (optional) — directory to cache downloaded zips (default ``~/.cache/nyc_taxi_streamlit``)
-
-**Local mode** — omit the token/repo; the app uses ``Config.base_dir`` (project root) and
-expects ``output/gold/nyc_taxi_gold.parquet`` from a prior ``python -m nyc_taxi`` run.
+Streamlit UI: Gold + KPIs from local ``output/`` or from the latest GitHub Actions
+``etl-output`` artifact when ``GITHUB_TOKEN`` + ``GITHUB_REPO`` (or Streamlit secrets)
+are set. Optional: ``GHA_ARTIFACT_NAME``, ``NYC_TAXI_ARTIFACT_CACHE``.
 """
 from __future__ import annotations
 
@@ -25,13 +16,8 @@ if str(_ROOT) not in sys.path:
 import pandas as pd
 import streamlit as st
 
-from nyc_taxi.config import (
-    Config,
-    data_period_for_chart_titles,
-    default_config,
-)
+from nyc_taxi.config import Config, data_period_for_chart_titles, default_config
 from nyc_taxi.github_artifact import download_and_extract_latest_artifact, parse_repo
-from nyc_taxi.pipeline import run_pipeline
 
 st.set_page_config(
     page_title="NYC Taxi — Mobility & Revenue",
@@ -47,11 +33,6 @@ def _streamlit_secrets() -> dict | None:
 
 
 def get_artifact_credentials() -> tuple[str, str, str] | None:
-    """
-    Return (token, owner/repo string, artifact_name) if GHA mode is enabled.
-
-    Precedence: environment variables, then Streamlit ``secrets.toml``.
-    """
     n = os.environ.get("GHA_ARTIFACT_NAME", "etl-output")
     t = os.environ.get("NYC_TAXI_GH_TOKEN")
     r = os.environ.get("NYC_TAXI_GH_REPO")
@@ -77,39 +58,24 @@ def _load_base_dir_from_artifact(
     token: str,
     repo_full: str,
     artifact_name: str,
-) -> tuple[str, str | None, int | str, str]:
-    """
-    Return ``(base_dir, artifact_output_root or None, artifact_id, created_at)``.
-
-    Not Streamlit-cached: the GitHub API is consulted every run so a new
-    ``etl-output`` upload is picked up immediately. The downloader still reuses
-    the on-disk folder under ``~/.cache/nyc_taxi_streamlit/artifact_<id>`` when
-    the id matches, so the zip is not re-downloaded unless the run id changes.
-    """
+) -> tuple[str, str | None]:
     owner, repo = parse_repo(repo_full)
-    base, aor, meta = download_and_extract_latest_artifact(
+    base, aor, _meta = download_and_extract_latest_artifact(
         token, owner, repo, artifact_name, cache_root=None
     )
-    aid = meta.get("id", "—")
     aor_s: str | None = str(aor) if aor is not None else None
-    return str(base), aor_s, aid, str(meta.get("created_at", ""))
+    return str(base), aor_s
 
 
 def get_app_config() -> Config:
-    """Config pointing at local ``output/`` or at extracted artifact layout."""
     trio = get_artifact_credentials()
     if trio is None:
         return default_config
     token, repo_full, aname = trio
     try:
-        base_s, aor_s, aid, created = _load_base_dir_from_artifact(token, repo_full, aname)
-        st.session_state["gha_artifact_id"] = aid
-        st.session_state["gha_artifact_created"] = created
+        base_s, aor_s = _load_base_dir_from_artifact(token, repo_full, aname)
     except Exception as e:
-        st.error(
-            f"Failed to load data from GitHub artifact **{aname}**: {e!s}. "
-            "Check token permissions (Actions: Read), `GITHUB_REPO`, and that a run produced the artifact."
-        )
+        st.error(f"Could not load artifact **{aname}**: {e!s}")
         st.stop()
     aor_p = Path(aor_s) if aor_s else None
     return Config(base_dir=Path(base_s), artifact_output_root=aor_p)
@@ -122,17 +88,9 @@ artifact_mode = get_artifact_credentials() is not None
 
 st.title("NYC Yellow Taxi — Analytics")
 if artifact_mode:
-    st.caption(
-        "Data from the latest **etl-output** artifact (API checked each run).  "
-        f"Created: `{st.session_state.get('gha_artifact_created', '—')}`  ·  "
-        f"id `{st.session_state.get('gha_artifact_id', '—')}`"
-    )
     with st.sidebar:
         if st.button("Reload from GitHub"):
             st.rerun()
-else:
-    st.caption("Gold and KPIs from local `output/` (run `python -m nyc_taxi` or use GHA + secrets for artifact mode).")
-
 
 
 def load_kpi(name: str) -> pd.DataFrame | None:
@@ -142,65 +100,37 @@ def load_kpi(name: str) -> pd.DataFrame | None:
     return None
 
 
-def _read_artifact_build_period(config: Config, df: pd.DataFrame) -> tuple[str, str, bool]:
-    """
-    Return (one-line label, source note, is_fallback_to_gold).
-
-    Prefer ETL-written sidecars from the same run as the PNGs. Cloud often uses a
-    flat ``gold/``/``kpi/`` tree at the zip root; also check ``etl_build_period.txt``.
-    """
+def _read_build_period(config: Config, df: pd.DataFrame) -> str:
     b = config.base_dir
-    candidates: list[tuple[Path, str]] = [
-        (config.kpi_dir / "kpi_chart_period.txt", "kpi/kpi_chart_period.txt"),
-        (b / "etl_build_period.txt", "etl_build_period.txt (next to gold/)"),
-        (b / "output" / "etl_build_period.txt", "output/etl_build_period.txt"),
-    ]
-    for path, source in candidates:
+    for path in (
+        config.kpi_dir / "kpi_chart_period.txt",
+        b / "etl_build_period.txt",
+        b / "output" / "etl_build_period.txt",
+    ):
         try:
             if path.is_file() and path.stat().st_size > 0:
-                return (path.read_text(encoding="utf-8").strip(), source, False)
+                return path.read_text(encoding="utf-8").strip()
         except OSError:
             continue
     for p in b.rglob("kpi_chart_period.txt"):
         try:
             if p.is_file() and p.stat().st_size > 0:
-                return (p.read_text(encoding="utf-8").strip(), f"rglob: {p.relative_to(b)}", False)
+                return p.read_text(encoding="utf-8").strip()
         except (OSError, ValueError):
             continue
-    return (data_period_for_chart_titles(config, df), "trip times in Gold (no sidecar in artifact)", True)
+    return data_period_for_chart_titles(config, df)
 
 
 if not gold_path.exists():
     if artifact_mode:
-        st.error(
-            f"No Gold Parquet at `{gold_path}`. The artifact may be empty, expired, or the zip layout changed. "
-            "Expect either `output/gold/nyc_taxi_gold.parquet` or a flat `gold/nyc_taxi_gold.parquet` (typical for `upload-artifact` of `output/`). "
-            "Confirm **ETL** succeeded and `GHA_ARTIFACT_NAME` matches the workflow (default `etl-output`)."
-        )
+        st.error(f"Gold table not found at `{gold_path}`.")
     else:
-        st.warning(
-            "No Gold Parquet yet. **Pick one:**\n\n"
-            "1. **This machine** — in the project folder, run: `python -m nyc_taxi` (creates `output/gold/…`), then refresh this app.\n\n"
-            "2. **Streamlit Cloud / no local ETL** — in **App settings → Secrets**, add `GITHUB_TOKEN` and `GITHUB_REPO` "
-            "(and optional `GHA_ARTIFACT_NAME`) so the app pulls the latest workflow artifact instead of the repo. "
-            "See `docs/DEPLOYMENT.md` and `.streamlit/secrets.toml.example`."
-        )
+        st.warning("No Gold data. Run `python -m nyc_taxi` locally or configure GitHub artifact secrets.")
     st.stop()
 
 df = pd.read_parquet(gold_path, engine="pyarrow")
-_period_line, _period_src, _period_is_fallback = _read_artifact_build_period(config, df)
-st.caption(
-    f"**Build period (matches KPI chart PNGs when ETL sidecars are in the zip):** {_period_line}  "
-    f"· _{_period_src}_"
-)
-if artifact_mode and _period_is_fallback:
-    st.info(
-        "No `kpi_chart_period.txt` / `etl_build_period.txt` in this artifact — label is from **Gold trip "
-        "dates** (e.g. Jan 2024). Re-run the **ETL** workflow on a commit that includes the current "
-        "`nyc_taxi/pipeline.py` (writes those files) and an updated `config.py` `parquet_url`, then use "
-        "**Reload from GitHub** in the sidebar. Redeploy the Streamlit app if it is on an old commit without "
-        "this reader."
-    )
+st.caption(f"Period: **{_read_build_period(config, df)}**")
+
 st.subheader("Dataset snapshot")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Rows", f"{len(df):,}")
@@ -233,8 +163,6 @@ with tab1:
     d = load_kpi("kpi_busiest_hour")
     if d is not None and "trip_count" in d.columns:
         st.bar_chart(d["trip_count"])
-    else:
-        st.caption("Missing kpi_busiest_hour.csv in artifact output.")
     img = kpi_dir / "kpi_busiest_hour.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
@@ -246,8 +174,6 @@ with tab2:
             d.sort_values("total_revenue", ascending=False),
             use_container_width=True,
         )
-    else:
-        st.caption("Missing kpi_revenue_by_borough.csv in artifact output.")
     img = kpi_dir / "kpi_revenue_by_borough.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
@@ -260,8 +186,6 @@ with tab3:
         st.line_chart(
             d.set_index("hour_of_day")[["avg_rev_per_mile", "median_rev_per_mile"]]
         )
-    else:
-        st.caption("Missing kpi_efficiency_index.csv in artifact output.")
     img = kpi_dir / "kpi_efficiency_index.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
@@ -273,13 +197,6 @@ with tab4:
     if d is not None and not d.empty and "share_pct" in d.columns:
         st.dataframe(d, use_container_width=True)
         st.bar_chart(d.set_index("payment_label" if "payment_label" in d.columns else d.columns[0])["share_pct"])
-    else:
-        st.caption("Missing kpi_payment_trends.csv in artifact output.")
     img = kpi_dir / "kpi_payment_trends.png"
     if img.exists():
         st.image(str(img), use_container_width=True)
-
-st.divider()
-st.caption(
-    f"Active data: `{config.gold_path}` (base_dir=`{config.base_dir}`) · app root=`{_ROOT}`"
-)
