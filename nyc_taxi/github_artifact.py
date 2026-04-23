@@ -12,6 +12,7 @@ import io
 import os
 import shutil
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,13 +66,28 @@ def list_artifacts_paginated(
     return out
 
 
+def _artifact_recency_key(a: dict[str, Any]) -> tuple[float, int]:
+    """Sort key: most recent first (UTC ``created_at``, then higher ``id`` as tie-breaker)."""
+    s = a.get("created_at") or ""
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        ts = datetime.fromisoformat(s)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        t = ts.timestamp()
+    except (ValueError, OSError, TypeError):
+        t = 0.0
+    return (t, int(a.get("id", 0) or 0))
+
+
 def get_latest_artifact(
     token: str,
     owner: str,
     repo: str,
     artifact_name: str,
 ) -> dict[str, Any] | None:
-    """Newest non-expired artifact with the given `name` (by `created_at`)."""
+    """Newest non-expired artifact with the given `name` (by ``created_at``, then ``id``)."""
     arts = list_artifacts_paginated(token, owner, repo)
     candidates = [
         a
@@ -80,7 +96,7 @@ def get_latest_artifact(
     ]
     if not candidates:
         return None
-    candidates.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+    candidates.sort(key=_artifact_recency_key, reverse=True)
     return candidates[0]
 
 

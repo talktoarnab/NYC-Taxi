@@ -69,10 +69,6 @@ def get_artifact_credentials() -> tuple[str, str, str] | None:
     return None
 
 
-@st.cache_data(
-    ttl=300,
-    show_spinner="Getting Latest Updates…",
-)
 def _load_base_dir_from_artifact(
     token: str,
     repo_full: str,
@@ -81,7 +77,10 @@ def _load_base_dir_from_artifact(
     """
     Return ``(base_dir, artifact_output_root or None, artifact_id, created_at)``.
 
-    Caches 5 minutes; use **Refresh** to call ``.clear()`` and pull a new run.
+    Not Streamlit-cached: the GitHub API is consulted every run so a new
+    ``etl-output`` upload is picked up immediately. The downloader still reuses
+    the on-disk folder under ``~/.cache/nyc_taxi_streamlit/artifact_<id>`` when
+    the id matches, so the zip is not re-downloaded unless the run id changes.
     """
     owner, repo = parse_repo(repo_full)
     base, aor, meta = download_and_extract_latest_artifact(
@@ -120,9 +119,13 @@ artifact_mode = get_artifact_credentials() is not None
 st.title("NYC Yellow Taxi — Analytics")
 if artifact_mode:
     st.caption(
-        "Latest Data "
-        f"Updated: `{st.session_state.get('gha_artifact_created', '—')}`"
+        "Data from the latest **etl-output** artifact (API checked each run).  "
+        f"Created: `{st.session_state.get('gha_artifact_created', '—')}`  ·  "
+        f"id `{st.session_state.get('gha_artifact_id', '—')}`"
     )
+    with st.sidebar:
+        if st.button("Reload from GitHub"):
+            st.rerun()
 else:
     st.caption("Gold and KPIs from local `output/` (run `python -m nyc_taxi` or use GHA + secrets for artifact mode).")
 

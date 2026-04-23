@@ -83,7 +83,7 @@ So `app.py` can download **ETL** output from your repo’s Actions:
 
    Aliases that `app.py` also accepts: `NYC_TAXI_GH_TOKEN`, `NYC_TAXI_GH_REPO`. For a local `streamlit run`, you can set the same keys in **`.streamlit/secrets.toml`** (do **not** commit the real token; use [`.streamlit/secrets.toml.example`](../.streamlit/secrets.toml.example) as a template).
 
-3. The app lists artifacts for `GITHUB_REPO`, picks the **newest** non-expired zip named `GHA_ARTIFACT_NAME`, downloads it, and extracts so `Config.base_dir/output/gold/…` exists. Use **Refresh from latest GitHub artifact** in the UI after a new workflow run. Cached downloads are kept under `~/.cache/nyc_taxi_streamlit/artifact_<id>` (or `NYC_TAXI_ARTIFACT_CACHE`).
+3. The app lists artifacts for `GITHUB_REPO`, picks the **newest** non-expired zip named `GHA_ARTIFACT_NAME` (by `created_at` and then artifact `id`), downloads it, and extracts so `Config.base_dir/output/gold/…` exists. Each Streamlit run queries the API again (no 5-minute in-memory cache). Extracted zips are reused on disk under `~/.cache/nyc_taxi_streamlit/artifact_<id>` (or `NYC_TAXI_ARTIFACT_CACHE`) when the id matches. Use the sidebar **Reload from GitHub** if you want to force a full rerun.
 
 ### Step 5 — If you are not using artifact secrets (local or VM)
 
@@ -95,7 +95,7 @@ So `app.py` can download **ETL** output from your repo’s Actions:
 - [ ] Artifact `etl-output` contains `output/gold/nyc_taxi_gold.parquet` and `output/kpi/`
 - [ ] `GITHUB_TOKEN` and `GITHUB_REPO` are set in Streamlit Secrets (for Cloud)
 - [ ] App URL loads; caption shows artifact id when in artifact mode
-- [ ] **Refresh** is used after a new run if the 5-minute cache is still serving old data
+- [ ] After a new workflow, the app’s caption **created** / **id** match the new run (or use **Reload from GitHub** in the sidebar)
 
 ---
 
