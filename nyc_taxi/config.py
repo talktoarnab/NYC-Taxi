@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Default TLC object; use another month or set NYC_TAXI_PARQUET_URL for scheduled runs
 _DEFAULT_PARQUET_URL = (
-    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2025-10.parquet"
+    "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2026-02.parquet"
 )
 # Same host pattern as trip Parquet, for CLI `--ym` / programmatic URL building
 TLC_TRIP_DATA_BASE = "https://d37ci6vzurychx.cloudfront.net/trip-data/"
