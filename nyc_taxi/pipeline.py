@@ -8,7 +8,6 @@ CSVs and static chart images for reporting or the Streamlit app.
 from __future__ import annotations
 
 import ssl
-import sys
 import urllib.request
 import warnings
 from dataclasses import dataclass
@@ -24,13 +23,7 @@ import pandas as pd  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
-from nyc_taxi.config import (
-    PAYMENT_MAP,
-    Config,
-    config_with_env_parquet_url,
-    default_config,
-    log_lines_parquet_url_resolution,
-)
+from nyc_taxi.config import PAYMENT_MAP, Config, default_config
 
 warnings.filterwarnings("ignore")
 
@@ -102,8 +95,6 @@ def run_pipeline(
     config: Config = default_config,
     verbose: bool = True,
     skip_charts: bool = False,
-    *,
-    apply_env_parquet_url: bool = True,
 ) -> PipelineResult:
     """
     Run the full ETL: download → load → physics filter → financial audit →
@@ -113,17 +104,7 @@ def run_pipeline(
         config: URLs, paths, and thresholds; see `nyc_taxi.config.Config`.
         verbose: When True, print progress and per-stage row counts.
         skip_charts: When True, skip matplotlib PNGs (KPI CSVs are still written).
-        apply_env_parquet_url: When True (default), merge in ``NYC_TAXI_PARQUET_URL`` from
-            the current process environment. Set False when the caller already fixed the
-            month via ``--ym`` or ``--parquet-url``.
     """
-    config = config_with_env_parquet_url(
-        config, apply_nyc_taxi_parquet_env=apply_env_parquet_url
-    )
-    # How ``NYC_TAXI_PARQUET_URL`` was read; always to stderr (including ``-q`` / CI).
-    for line in log_lines_parquet_url_resolution(config):
-        print(line, file=sys.stderr)
-
     config.ensure_dirs()
     plt.rcParams.update({"figure.dpi": 130, "figure.figsize": (10, 5)})
     sns.set_theme(style="whitegrid", palette="muted", font_scale=1.1)

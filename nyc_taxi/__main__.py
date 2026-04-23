@@ -9,38 +9,16 @@ Run from the project root so `nyc_taxi` resolves as a package::
 from __future__ import annotations
 
 import argparse
-import re
 import sys
-from dataclasses import replace
 
-from nyc_taxi.config import (
-    TLC_TRIP_DATA_BASE,
-    default_config,
-    log_lines_parquet_url_resolution,
-    config_with_env_parquet_url,
-    Config,
-)
+from nyc_taxi.config import default_config
+from nyc_taxi.pipeline import run_pipeline
 
 
 def main() -> int:
     """Parse arguments and run :func:`nyc_taxi.pipeline.run_pipeline`."""
     p = argparse.ArgumentParser(
         description="NYC TLC Yellow Taxi ETL: download, clean, Gold Parquet, KPI CSV/PNG."
-    )
-    p.add_argument(
-        "--ym",
-        metavar="YYYY-MM",
-        help=(
-            "TLC month for Yellow Taxi Parquet (e.g. 2025-10). "
-            "Builds the standard CloudFront URL; overrides NYC_TAXI_PARQUET_URL."
-        ),
-    )
-    p.add_argument(
-        "--parquet-url",
-        help=(
-            "Full URL to a yellow_tripdata_*.parquet file; "
-            "overrides --ym and NYC_TAXI_PARQUET_URL."
-        ),
     )
     p.add_argument(
         "--no-charts",
@@ -53,39 +31,11 @@ def main() -> int:
         action="store_true",
         help="Less console output.",
     )
-    p.add_argument(
-        "--show-parquet-env",
-        action="store_true",
-        help="Print how NYC_TAXI_PARQUET_URL is read and the resolved file/URL, then exit (no ETL).",
-    )
     args = p.parse_args()
-    if args.show_parquet_env:
-        if args.ym or args.parquet_url or args.no_charts or args.quiet:
-            p.error("Use --show-parquet-env alone, without other ETL options.")
-        cfg = config_with_env_parquet_url(
-            Config(),
-            apply_nyc_taxi_parquet_env=True,
-        )
-        for line in log_lines_parquet_url_resolution(cfg):
-            print(line)
-        return 0
-    if args.parquet_url and args.ym:
-        p.error("Use either --parquet-url or --ym, not both.")
-    cfg = default_config
-    if args.parquet_url:
-        cfg = replace(cfg, parquet_url=args.parquet_url.strip())
-    elif args.ym:
-        if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", args.ym):
-            p.error("--ym must look like YYYY-MM (e.g. 2025-03).")
-        month_url = f"{TLC_TRIP_DATA_BASE}yellow_tripdata_{args.ym}.parquet"
-        cfg = replace(cfg, parquet_url=month_url)
-    from nyc_taxi.pipeline import run_pipeline
-
     result = run_pipeline(
-        cfg,
+        default_config,
         verbose=not args.quiet,
         skip_charts=args.no_charts,
-        apply_env_parquet_url=not (bool(args.ym) or bool(args.parquet_url)),
     )
     if not args.quiet:
         print(

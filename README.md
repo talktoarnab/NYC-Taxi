@@ -48,9 +48,6 @@ Options:
 
 - `--no-charts` — Write KPI **CSV** files only; skip PNG chart generation (faster).
 - `-q` / `--quiet` — Minimal console output.
-- `--ym YYYY-MM` — Use the standard TLC URL for that month (overrides `NYC_TAXI_PARQUET_URL`).
-- `--parquet-url` — Use a full Parquet URL (overrides `--ym` and env).
-- `--show-parquet-env` — Print how `NYC_TAXI_PARQUET_URL` is read (raw `repr`, whether the key exists, resolved URL) and exit; no ETL or download.
 
 On success you get row-count audits in the console, a Gold Parquet file, and KPI files under `output/`.
 
@@ -86,10 +83,10 @@ print(result.gold_path, result.gold_rows)
 
 ## Data sources (default)
 
-- **Trips** — e.g. `https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet` (default when `NYC_TAXI_PARQUET_URL` is unset). The download is saved under `data/raw/` using the filename from the URL.
+- **Trips** — e.g. `https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet` (configurable in `nyc_taxi.config.Config.parquet_url`). The file is written under `data/raw/` with the same basename as the URL.
 - **Zones** — `https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv`
 
-**Another month, on a schedule:** set the environment variable `NYC_TAXI_PARQUET_URL` to the full URL for the month you want (cron, systemd timer, or `python -m nyc_taxi --ym 2025-10`). For **GitHub Actions** only, add that name as a **Repository variable** (Settings → Actions → Variables) or a **Repository secret** (the workflow passes `secrets.NYC_TAXI_PARQUET_URL` first, then `vars.…`). `config.py` only reads the real OS environment at run time, not a variable stored only on GitHub’s UI until the workflow sets `env:`. The pipeline only downloads a file if it is missing—delete the old `data/raw/yellow_tripdata_*.parquet` (or use a new month so the path changes) when you need a fresh download.
+To use another month, edit `parquet_url` in `Config` (or pass `parquet_url=...` to `Config`) so it matches a published TLC `yellow_tripdata_YYYY-MM.parquet` filename, or place the file under `data/raw/` with the expected name. The download step skips if the file already exists.
 
 ## Deployment (Streamlit, GitHub Actions, OCI, AWS)
 

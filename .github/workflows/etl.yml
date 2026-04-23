@@ -11,8 +11,6 @@ on:
 
 jobs:
   run-etl:
-    # If you store NYC_TAXI_PARQUET_URL in Settings → Environments → <name> (not
-    # plain repository Variables), add:  environment: <name>  to this job.
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -30,17 +28,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Set NYC_TAXI_PARQUET_URL under Settings → Actions → Variables, or the same
-      # name under Secrets (e.g. full URL: …/yellow_tripdata_2025-10.parquet).
-      # Do not override with a shell "export" here — that was ignoring Variables.
       - name: Run ETL
-        env:
-          # Secret, if set, wins; otherwise Repository / Environment variable
-          NYC_TAXI_PARQUET_URL: ${{ secrets.NYC_TAXI_PARQUET_URL || vars.NYC_TAXI_PARQUET_URL }}
         run: |
-          if [ -z "$NYC_TAXI_PARQUET_URL" ]; then
-            echo '::warning::NYC_TAXI_PARQUET_URL is not set. Add it under GitHub → Settings → Actions → Variables or Repository secrets, or the ETL uses the 2024-01 default from config.py.'
-          fi
           python -m nyc_taxi -q
 
       - name: Upload output artifacts
