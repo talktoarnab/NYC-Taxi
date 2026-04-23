@@ -50,6 +50,7 @@ Options:
 - `-q` / `--quiet` — Minimal console output.
 - `--ym YYYY-MM` — Use the standard TLC URL for that month (overrides `NYC_TAXI_PARQUET_URL`).
 - `--parquet-url` — Use a full Parquet URL (overrides `--ym` and env).
+- `--show-parquet-env` — Print how `NYC_TAXI_PARQUET_URL` is read (raw `repr`, whether the key exists, resolved URL) and exit; no ETL or download.
 
 On success you get row-count audits in the console, a Gold Parquet file, and KPI files under `output/`.
 

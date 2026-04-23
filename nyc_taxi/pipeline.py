@@ -7,7 +7,6 @@ CSVs and static chart images for reporting or the Streamlit app.
 """
 from __future__ import annotations
 
-import os
 import ssl
 import sys
 import urllib.request
@@ -30,6 +29,7 @@ from nyc_taxi.config import (
     Config,
     config_with_env_parquet_url,
     default_config,
+    log_lines_parquet_url_resolution,
 )
 
 warnings.filterwarnings("ignore")
@@ -120,17 +120,9 @@ def run_pipeline(
     config = config_with_env_parquet_url(
         config, apply_nyc_taxi_parquet_env=apply_env_parquet_url
     )
-    # Always one line: proves which file the run uses (including ``-q`` in GitHub Actions).
-    if os.environ.get("NYC_TAXI_PARQUET_URL", "").strip():
-        src = "NYC_TAXI_PARQUET_URL"
-    else:
-        src = "default in config (no NYC_TAXI_PARQUET_URL in environment)"
-    print(
-        f"ETL trip file: {config.parquet_path.name} ← {src}",
-        file=sys.stderr,
-    )
-    if verbose:
-        print(f"  Parquet URL: {config.parquet_url}")
+    # How ``NYC_TAXI_PARQUET_URL`` was read; always to stderr (including ``-q`` / CI).
+    for line in log_lines_parquet_url_resolution(config):
+        print(line, file=sys.stderr)
 
     config.ensure_dirs()
     plt.rcParams.update({"figure.dpi": 130, "figure.figsize": (10, 5)})

@@ -11,6 +11,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+_PARQUET_ENV_KEY = "NYC_TAXI_PARQUET_URL"
+
 # Resolve project root from this file: …/NYC Taxi/nyc_taxi/config.py → …/NYC Taxi
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,12 +32,64 @@ def _parquet_basename_from_url(url: str) -> str:
     return name
 
 
+@dataclass(frozen=True)
+class ParquetUrlEnvReport:
+    """
+    How ``NYC_TAXI_PARQUET_URL`` was read from ``os.environ`` and the URL that the
+    default :class:`Config` factory would use (before any CLI or merge in ``run_pipeline``).
+    """
+
+    key: str
+    key_in_environ: bool
+    # Exact value from the OS if the key is present (may be "" or only whitespace);
+    # ``None`` only when the key is absent.
+    value_raw: str | None
+    # Whether a non-empty ``.strip()`` was applied and used as the Parquet URL.
+    uses_stripped_value: bool
+    # URL ``Config(parquet_url=...)`` / default factory will use for ``parquet_url``.
+    resolved_for_default_config: str
+
+
+def report_parquet_url_from_environ() -> ParquetUrlEnvReport:
+    """
+    Inspect what ``NYC_TAXI_PARQUET_URL`` is in the process environment (one source
+    of truth for :func:`_parquet_url_from_environ`).
+
+    * ``key_in_environ is False`` → variable was never set; ``value_raw is None``.
+    * ``key_in_environ is True`` and ``uses_stripped_value is False`` → set but empty/whitespace;
+      the built-in default month URL is used.
+    """
+    in_env = _PARQUET_ENV_KEY in os.environ
+    if not in_env:
+        return ParquetUrlEnvReport(
+            _PARQUET_ENV_KEY,
+            False,
+            None,
+            False,
+            _DEFAULT_PARQUET_URL,
+        )
+    raw = os.environ[_PARQUET_ENV_KEY]
+    stripped = raw.strip() if raw else ""
+    if stripped:
+        return ParquetUrlEnvReport(
+            _PARQUET_ENV_KEY,
+            True,
+            raw,
+            True,
+            stripped,
+        )
+    return ParquetUrlEnvReport(
+        _PARQUET_ENV_KEY,
+        True,
+        raw,
+        False,
+        _DEFAULT_PARQUET_URL,
+    )
+
+
 def _parquet_url_from_environ() -> str:
-    """NYC_TAXI_PARQUET_URL if non-empty, else the built-in default."""
-    raw = os.environ.get("NYC_TAXI_PARQUET_URL")
-    if raw is not None and raw.strip():
-        return raw.strip()
-    return _DEFAULT_PARQUET_URL
+    """NYC_TAXI_PARQUET_URL if non-empty after strip, else the built-in default."""
+    return report_parquet_url_from_environ().resolved_for_default_config
 
 
 @dataclass(frozen=True)
@@ -120,10 +174,34 @@ def config_with_env_parquet_url(
     """
     if not apply_nyc_taxi_parquet_env:
         return config
-    raw = os.environ.get("NYC_TAXI_PARQUET_URL", "").strip()
-    if not raw or raw == config.parquet_url:
+    r = report_parquet_url_from_environ()
+    if not r.uses_stripped_value or r.resolved_for_default_config == config.parquet_url:
         return config
-    return replace(config, parquet_url=raw)
+    return replace(config, parquet_url=r.resolved_for_default_config)
+
+
+def log_lines_parquet_url_resolution(config: Config) -> list[str]:
+    """
+    Human-readable lines for logs / stderr: what ``NYC_TAXI_PARQUET_URL`` was and the
+    effective :attr:`config.parquet_url` for this run.
+    """
+    r = report_parquet_url_from_environ()
+    lines = [
+        f"Parquet env {r.key!r}: key in os.environ = {r.key_in_environ!r}, "
+        f"uses value after strip = {r.uses_stripped_value!r}",
+    ]
+    if r.key_in_environ and r.value_raw is not None:
+        lines.append(
+            f"  raw os.environ[...] (repr, len={len(r.value_raw)}): {r.value_raw!r}"
+        )
+    lines.append(
+        f"  default Config URL from env: {r.resolved_for_default_config!r} "
+        f"(file {_parquet_basename_from_url(r.resolved_for_default_config)!r})"
+    )
+    lines.append(
+        f"  this run: {config.parquet_url!r} → file {config.parquet_path.name!r}"
+    )
+    return lines
 
 
 # TLC `payment_type` integer codes (used for labels and payment-mix KPIs)

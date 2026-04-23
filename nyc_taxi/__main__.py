@@ -16,8 +16,10 @@ from dataclasses import replace
 from nyc_taxi.config import (
     TLC_TRIP_DATA_BASE,
     default_config,
+    log_lines_parquet_url_resolution,
+    config_with_env_parquet_url,
+    Config,
 )
-from nyc_taxi.pipeline import run_pipeline
 
 
 def main() -> int:
@@ -51,7 +53,22 @@ def main() -> int:
         action="store_true",
         help="Less console output.",
     )
+    p.add_argument(
+        "--show-parquet-env",
+        action="store_true",
+        help="Print how NYC_TAXI_PARQUET_URL is read and the resolved file/URL, then exit (no ETL).",
+    )
     args = p.parse_args()
+    if args.show_parquet_env:
+        if args.ym or args.parquet_url or args.no_charts or args.quiet:
+            p.error("Use --show-parquet-env alone, without other ETL options.")
+        cfg = config_with_env_parquet_url(
+            Config(),
+            apply_nyc_taxi_parquet_env=True,
+        )
+        for line in log_lines_parquet_url_resolution(cfg):
+            print(line)
+        return 0
     if args.parquet_url and args.ym:
         p.error("Use either --parquet-url or --ym, not both.")
     cfg = default_config
@@ -62,6 +79,8 @@ def main() -> int:
             p.error("--ym must look like YYYY-MM (e.g. 2025-03).")
         month_url = f"{TLC_TRIP_DATA_BASE}yellow_tripdata_{args.ym}.parquet"
         cfg = replace(cfg, parquet_url=month_url)
+    from nyc_taxi.pipeline import run_pipeline
+
     result = run_pipeline(
         cfg,
         verbose=not args.quiet,
