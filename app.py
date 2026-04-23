@@ -128,7 +128,8 @@ if not gold_path.exists():
         st.warning("No Gold data. Run `python -m nyc_taxi` locally or configure GitHub artifact secrets.")
     st.stop()
 
-st.caption(f"Period: **{_read_build_period(config, gold_path)}**")
+period_str = _read_build_period(config, gold_path)
+st.caption(f"Data period: **{period_str}**")
 
 n_trips = int(pq.ParquetFile(gold_path).metadata.num_rows)
 money = pd.read_parquet(
@@ -174,17 +175,20 @@ if payment_df is not None and not payment_df.empty:
             )
 
 st.divider()
-st.subheader("Charts")
+st.subheader(f"Charts — {period_str}")
 
 d_hour = load_kpi("kpi_busiest_hour")
 if d_hour is not None and "trip_count" in d_hour.columns:
-    st.markdown("##### Trips by hour")
+    st.markdown("### Trips by hour")
     st.caption("Share of trips in each hour (bar height ∝ count).")
-    st.bar_chart(d_hour["trip_count"])
+    # String labels avoid Streamlit treating hour integers as a time scale (wrong year on axis).
+    _h = d_hour["trip_count"].copy()
+    _h.index = _h.index.map(lambda h: f"{int(h):02d}:00")
+    st.bar_chart(_h)
 
 d_borough = load_kpi("kpi_revenue_by_borough")
 if d_borough is not None and "total_revenue" in d_borough.columns:
-    st.markdown("##### Revenue by borough")
+    st.markdown("### Revenue by borough")
     st.caption("% of total revenue by pickup borough.")
     bb = d_borough.sort_values("total_revenue", ascending=False)
     tr = float(bb["total_revenue"].sum())
@@ -195,17 +199,19 @@ d_eff = load_kpi("kpi_efficiency_index")
 if d_eff is not None:
     d_eff = d_eff.reset_index() if "hour_of_day" not in d_eff.columns else d_eff
 if d_eff is not None and "hour_of_day" in d_eff.columns:
-    st.markdown("##### Revenue per mile by hour")
+    st.markdown("### Revenue per mile by hour")
     st.caption("Mean and median $/mile (multi-month ETL may show mean only for both lines).")
-    st.line_chart(
-        d_eff.set_index("hour_of_day")[["avg_rev_per_mile", "median_rev_per_mile"]]
-    )
+    _eff = d_eff.set_index("hour_of_day")[
+        ["avg_rev_per_mile", "median_rev_per_mile"]
+    ].copy()
+    _eff.index = _eff.index.map(lambda h: f"{int(h):02d}:00")
+    st.line_chart(_eff)
 
 d_pay = load_kpi("kpi_payment_trends")
 if d_pay is not None and not d_pay.empty:
     d_pay = d_pay.reset_index() if "payment_label" not in d_pay.columns else d_pay
 if d_pay is not None and not d_pay.empty and "share_pct" in d_pay.columns:
-    st.markdown("##### Payment mix")
+    st.markdown("### Payment mix")
     st.caption("% of trips by payment type.")
     label_col = "payment_label" if "payment_label" in d_pay.columns else d_pay.columns[0]
     st.bar_chart(d_pay.set_index(label_col)["share_pct"])
