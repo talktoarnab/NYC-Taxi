@@ -1,6 +1,7 @@
 # Run the NYC Taxi ETL on a schedule and on demand. Artifacts (output/) can be
 # downloaded from the workflow run to verify the pipeline, or you can extend this
 # with a step to sync to S3 for Streamlit to consume (requires app changes).
+#loutput: .github/workflows/etl.yml
 name: ETL — NYC Taxi
 
 on:
