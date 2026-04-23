@@ -37,7 +37,7 @@ class Config:
 
     # Official TLC data lake (Parquet) and static zone → borough table
     parquet_url: str = (
-        "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet"
+        "https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2026-02.parquet"
     )
     zone_url: str = (
         "https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv"
