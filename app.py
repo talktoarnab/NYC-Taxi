@@ -87,10 +87,6 @@ kpi_dir = config.kpi_dir
 artifact_mode = get_artifact_credentials() is not None
 
 st.title("NYC Yellow Taxi — Analytics")
-if artifact_mode:
-    with st.sidebar:
-        if st.button("Reload from GitHub"):
-            st.rerun()
 
 
 def load_kpi(name: str) -> pd.DataFrame | None:
