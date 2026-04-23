@@ -7,6 +7,7 @@ CSVs and static chart images for reporting or the Streamlit app.
 """
 from __future__ import annotations
 
+import os
 import ssl
 import urllib.request
 import warnings
@@ -127,9 +128,19 @@ def run_pipeline(
                 f"PARQUET_URL mode: PARQUET_HISTORY_MONTHS={read_parquet_history_months()} "
                 f"→ {len(multi_urls)} monthly Parquet file(s) …"
             )
+        ci_log = (not verbose) and os.environ.get("CI", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         frames: list[pd.DataFrame] = []
-        for url in multi_urls:
+        for i, url in enumerate(multi_urls):
             dest = config.raw_dir / url.rsplit("/", 1)[-1]
+            if ci_log:
+                print(
+                    f"[CI] Parquet {i + 1}/{len(multi_urls)}: {dest.name}",
+                    flush=True,
+                )
             try:
                 _download_if_missing(url, dest, verbose)
                 frames.append(pd.read_parquet(dest, engine="pyarrow"))
