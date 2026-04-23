@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import pandas as pd
+import pyarrow.parquet as pq
 import streamlit as st
 
 from nyc_taxi.config import Config, data_period_for_chart_titles, default_config
@@ -96,7 +97,7 @@ def load_kpi(name: str) -> pd.DataFrame | None:
     return None
 
 
-def _read_build_period(config: Config, df: pd.DataFrame) -> str:
+def _read_build_period(config: Config, gold_path: Path) -> str:
     b = config.base_dir
     for path in (
         config.kpi_dir / "kpi_chart_period.txt",
@@ -114,7 +115,10 @@ def _read_build_period(config: Config, df: pd.DataFrame) -> str:
                 return p.read_text(encoding="utf-8").strip()
         except (OSError, ValueError):
             continue
-    return data_period_for_chart_titles(config, df)
+    ts = pd.read_parquet(
+        gold_path, columns=["tpep_pickup_datetime"], engine="pyarrow"
+    )
+    return data_period_for_chart_titles(config, ts)
 
 
 if not gold_path.exists():
@@ -124,75 +128,95 @@ if not gold_path.exists():
         st.warning("No Gold data. Run `python -m nyc_taxi` locally or configure GitHub artifact secrets.")
     st.stop()
 
-df = pd.read_parquet(gold_path, engine="pyarrow")
-st.caption(f"Period: **{_read_build_period(config, df)}**")
+st.caption(f"Period: **{_read_build_period(config, gold_path)}**")
 
-st.subheader("Dataset snapshot")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Rows", f"{len(df):,}")
-c2.metric("Columns", f"{len(df.columns)}")
-c3.metric("Avg total ($)", f"{df['total_amount'].mean():.2f}")
-c4.metric("Avg $/mile", f"{df['revenue_per_mile'].mean():.2f}")
-
-st.dataframe(
-    df[
-        [
-            "tpep_pickup_datetime",
-            "pickup_borough",
-            "dropoff_borough",
-            "trip_distance",
-            "total_amount",
-            "revenue_per_mile",
-            "payment_label",
-        ]
-    ].head(200),
-    use_container_width=True,
-    height=280,
+n_trips = int(pq.ParquetFile(gold_path).metadata.num_rows)
+money = pd.read_parquet(
+    gold_path, columns=["total_amount", "revenue_per_mile"], engine="pyarrow"
 )
+avg_total = float(money["total_amount"].mean())
+avg_rpm = float(money["revenue_per_mile"].mean())
+del money
+
+st.subheader("Summary")
+c1, c2, c3 = st.columns(3)
+c1.metric("Trips (Gold rows)", f"{n_trips:,}")
+c2.metric("Avg fare + extras ($)", f"{avg_total:.2f}")
+c3.metric("Avg revenue / mile ($)", f"{avg_rpm:.2f}")
+
+borough_df = load_kpi("kpi_revenue_by_borough")
+payment_df = load_kpi("kpi_payment_trends")
+if borough_df is not None and not borough_df.empty and "total_revenue" in borough_df.columns:
+    br = borough_df.sort_values("total_revenue", ascending=False)
+    total_rev = float(br["total_revenue"].sum())
+    st.markdown("**Revenue by pickup borough** (% of total)")
+    n_show = min(5, len(br))
+    cols = st.columns(n_show)
+    for i, (bname, row) in enumerate(br.head(n_show).iterrows()):
+        pct = (float(row["total_revenue"]) / total_rev * 100) if total_rev else 0.0
+        cols[i].metric(str(bname), f"{pct:.1f}%", f"${float(row['total_revenue'])/1e6:.2f}M")
+
+if payment_df is not None and not payment_df.empty:
+    pay = (
+        payment_df.reset_index()
+        if "payment_label" not in payment_df.columns
+        else payment_df.copy()
+    )
+    if "share_pct" in pay.columns and "payment_label" in pay.columns:
+        st.markdown("**Payment method** (% of trips)")
+        n_pay = min(6, len(pay))
+        pc = st.columns(min(4, n_pay))
+        for i, row in enumerate(pay.head(n_pay).itertuples(index=False)):
+            pc[i % len(pc)].metric(
+                str(row.payment_label),
+                f"{float(row.share_pct):.1f}%",
+                f"{int(row.trip_count):,} trips",
+            )
 
 st.divider()
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["Busiest hour", "Revenue by borough", "Efficiency ($/mi)", "Payment mix"]
-)
+st.subheader("Charts")
 
-with tab1:
-    d = load_kpi("kpi_busiest_hour")
-    if d is not None and "trip_count" in d.columns:
-        st.bar_chart(d["trip_count"])
-    img = kpi_dir / "kpi_busiest_hour.png"
-    if img.exists():
-        st.image(str(img), use_container_width=True)
+d_hour = load_kpi("kpi_busiest_hour")
+if d_hour is not None and "trip_count" in d_hour.columns:
+    st.markdown("##### Trips by hour")
+    st.caption("Share of trips in each hour (bar height ∝ count).")
+    st.bar_chart(d_hour["trip_count"])
 
-with tab2:
-    d = load_kpi("kpi_revenue_by_borough")
-    if d is not None:
-        st.dataframe(
-            d.sort_values("total_revenue", ascending=False),
-            use_container_width=True,
-        )
-    img = kpi_dir / "kpi_revenue_by_borough.png"
-    if img.exists():
-        st.image(str(img), use_container_width=True)
+d_borough = load_kpi("kpi_revenue_by_borough")
+if d_borough is not None and "total_revenue" in d_borough.columns:
+    st.markdown("##### Revenue by borough")
+    st.caption("% of total revenue by pickup borough.")
+    bb = d_borough.sort_values("total_revenue", ascending=False)
+    tr = float(bb["total_revenue"].sum())
+    pct_series = bb["total_revenue"] / tr * 100 if tr else bb["total_revenue"] * 0
+    st.bar_chart(pct_series.rename("% revenue"))
 
-with tab3:
-    d = load_kpi("kpi_efficiency_index")
-    if d is not None:
-        d = d.reset_index() if "hour_of_day" not in d.columns else d
-    if d is not None and "hour_of_day" in d.columns:
-        st.line_chart(
-            d.set_index("hour_of_day")[["avg_rev_per_mile", "median_rev_per_mile"]]
-        )
-    img = kpi_dir / "kpi_efficiency_index.png"
-    if img.exists():
-        st.image(str(img), use_container_width=True)
+d_eff = load_kpi("kpi_efficiency_index")
+if d_eff is not None:
+    d_eff = d_eff.reset_index() if "hour_of_day" not in d_eff.columns else d_eff
+if d_eff is not None and "hour_of_day" in d_eff.columns:
+    st.markdown("##### Revenue per mile by hour")
+    st.caption("Mean and median $/mile (multi-month ETL may show mean only for both lines).")
+    st.line_chart(
+        d_eff.set_index("hour_of_day")[["avg_rev_per_mile", "median_rev_per_mile"]]
+    )
 
-with tab4:
-    d = load_kpi("kpi_payment_trends")
-    if d is not None and not d.empty and "payment_label" not in d.columns:
-        d = d.reset_index()
-    if d is not None and not d.empty and "share_pct" in d.columns:
-        st.dataframe(d, use_container_width=True)
-        st.bar_chart(d.set_index("payment_label" if "payment_label" in d.columns else d.columns[0])["share_pct"])
-    img = kpi_dir / "kpi_payment_trends.png"
+d_pay = load_kpi("kpi_payment_trends")
+if d_pay is not None and not d_pay.empty:
+    d_pay = d_pay.reset_index() if "payment_label" not in d_pay.columns else d_pay
+if d_pay is not None and not d_pay.empty and "share_pct" in d_pay.columns:
+    st.markdown("##### Payment mix")
+    st.caption("% of trips by payment type.")
+    label_col = "payment_label" if "payment_label" in d_pay.columns else d_pay.columns[0]
+    st.bar_chart(d_pay.set_index(label_col)["share_pct"])
+
+for label, fname in (
+    ("Busiest hour (detail)", "kpi_busiest_hour.png"),
+    ("Revenue by borough (detail)", "kpi_revenue_by_borough.png"),
+    ("Efficiency (detail)", "kpi_efficiency_index.png"),
+    ("Payment mix (detail)", "kpi_payment_trends.png"),
+):
+    img = kpi_dir / fname
     if img.exists():
-        st.image(str(img), use_container_width=True)
+        with st.expander(label):
+            st.image(str(img), use_container_width=True)
